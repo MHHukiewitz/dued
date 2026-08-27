@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose a change to dued
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is hard or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should dued do?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: CLI, HTML report, index schema, language support, or docs.
+  - type: markdown
+    attributes:
+      value: |
+        Keep analysis local. Do not propose an MCP server or a third-party analysis API.

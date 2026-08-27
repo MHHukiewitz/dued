@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a defect in dued
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues first. For a security defect, use the private advisory form.
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What should happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: Commands and flags that reproduce the problem.
+      render: bash
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `dued version`, or the git commit.
+    validations:
+      required: true
+  - type: input
+    id: languages
+    attributes:
+      label: Target languages
+      description: Python, TypeScript, Rust, or a mix.
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra
+      description: Logs, report snippets, or index notes. Do not paste secrets or private source.
