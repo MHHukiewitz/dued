@@ -7,7 +7,7 @@ dued/index.sqlite
 dued/YYYY-MM-DD_HH-MM-SS/
 ```
 
-The pack folder uses local time, for example `2026-08-27_11-20-00`. There is no `latest` folder. Open the HTML file in that dated pack. `dued analyze` prints the path.
+The pack folder uses local time, for example `2026-08-27_11-20-00`. Open `report.html` in that folder. `dued analyze` prints the path.
 
 `dued report` rebuilds the newest dated pack from `dued/index.sqlite`. It does not walk the tree again.
 

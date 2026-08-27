@@ -24,7 +24,7 @@ Print the package version.
 
 ## `dued analyze`
 
-Full pack: scan, reports, HTML explorer, and review files.
+Full pack: scan, index, and HTML explorer.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -50,7 +50,7 @@ Write `dued/index.sqlite` only. No report pack.
 
 ## `dued report`
 
-Rebuild `report.html` and the compact JSON tables from the current index. Print a short brief. Does not scan again.
+Rebuild `report.html` and the compact JSON tables in the newest dated pack. Print a short summary. Does not scan again.
 
 ## `dued rank`
 
@@ -100,7 +100,7 @@ Write SVG and HTML treemap heatmaps under the newest dated pack in `dued/`.
 
 ## `dued review`
 
-Write a human review pack from the current index.
+Write `review.json` into the newest dated pack.
 
 | Flag | Meaning |
 | --- | --- |

@@ -19,7 +19,7 @@ Open:
 dued/YYYY-MM-DD_HH-MM-SS/report.html
 ```
 
-`dued analyze` prints that path. There is no `latest` folder.
+`dued analyze` prints that path. Open `report.html` in the dated pack.
 
 The HTML explorer includes the compact catalog: files, symbols, issues, names, clones, and reading order.
 

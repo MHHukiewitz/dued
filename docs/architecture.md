@@ -29,7 +29,7 @@ The Python package is what you install from PyPI. Each `dued.*` module calls the
 9. **Names** — token health and homonyms.
 10. **Clones** — token overlap and optional embed neighbors.
 11. **Embed** (optional) — local ONNX vectors for signature, docstring, and body.
-12. **Reports** — HTML explorer, JSON tables, brief, agent pack.
+12. **Reports** — HTML explorer, JSON tables, agent pack.
 
 `dued report` and the query commands reuse the SQLite index. They do not walk again.
 
