@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
@@ -12,7 +11,7 @@ use crate::hollow::hollow_symbols;
 use crate::inventory::inventory;
 use crate::issues::list_issues;
 use crate::names::analyze_names;
-use crate::paths::report_root;
+use crate::paths::{new_report_dir, newest_report_dir};
 use crate::progress::note;
 use crate::rank::reading_order;
 
@@ -23,35 +22,13 @@ pub fn write_report_dir(repo: &Path, conn: &Connection, extra: Value) -> PathBuf
 }
 
 pub fn refresh_report(repo: &Path, conn: &Connection) -> PathBuf {
-    let latest = report_root(repo).join("latest");
-    if latest_ready(&latest) {
-        let dest = latest.canonicalize().unwrap_or(latest);
+    if let Some(dest) = newest_report_dir(repo) {
         note("rebuild explorer from the existing index");
         fill_report(repo, conn, &dest, json!({}));
         dest
     } else {
         write_report_dir(repo, conn, json!({}))
     }
-}
-
-fn latest_ready(latest: &Path) -> bool {
-    latest.is_dir() || latest.is_file() || latest.symlink_metadata().is_ok()
-}
-
-fn new_report_dir(repo: &Path) -> PathBuf {
-    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let dest = report_root(repo).join(&stamp);
-    fs::create_dir_all(&dest).ok();
-    let latest = report_root(repo).join("latest");
-    if latest.exists() || latest.symlink_metadata().is_ok() {
-        let _ = fs::remove_file(&latest);
-        let _ = fs::remove_dir_all(&latest);
-    }
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&stamp, &latest).ok();
-    }
-    dest
 }
 
 fn fill_report(repo: &Path, conn: &Connection, dest: &Path, extra: Value) {
@@ -121,8 +98,6 @@ fn write_brief_files(repo: &Path, conn: &Connection, dest: &Path, extra: Value, 
     }
     fs::write(dest.join("index.json"), serde_json::to_string_pretty(&brief).unwrap()).ok();
     fs::write(dest.join("rank.json"), serde_json::to_string_pretty(&order).unwrap()).ok();
-    let md = brief_md(&brief);
-    fs::write(dest.join("brief.md"), &md).ok();
     note(&format!("HTML explorer {}", dest.join("report.html").display()));
     fs::write(
         dest.join("agent.json"),
@@ -139,59 +114,6 @@ fn write_brief_files(repo: &Path, conn: &Connection, dest: &Path, extra: Value, 
         .unwrap(),
     )
     .ok();
-}
-
-fn brief_md(brief: &Value) -> String {
-    let langs = brief["languages"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .filter_map(|i| Some(format!("{}={}", i["language"].as_str()?, i["n"])))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut lines = vec![
-        "# dued brief".into(),
-        String::new(),
-        format!("Repo: `{}`", brief["repo"].as_str().unwrap_or("")),
-        format!("Files: {}  Symbols: {}", brief["files"], brief["symbols"]),
-        format!("Languages: {langs}"),
-        String::new(),
-        "## Reading order".into(),
-        String::new(),
-    ];
-    if let Some(order) = brief["reading_order"].as_array() {
-        for item in order {
-            lines.push(format!(
-                "- `{}::{}` — {} (cognitive {})",
-                item["relpath"].as_str().unwrap_or(""),
-                item["name"].as_str().unwrap_or(""),
-                item["why"].as_str().unwrap_or(""),
-                item["cognitive"]
-            ));
-        }
-    }
-    lines.push(String::new());
-    if let Some(issues) = brief["issues"].as_array() {
-        lines.push("## Issues".into());
-        lines.push(String::new());
-        for item in issues.iter().take(20) {
-            lines.push(format!(
-                "- **{}** `{}::{}` — {}",
-                item["kind"].as_str().unwrap_or(""),
-                item["relpath"].as_str().unwrap_or(""),
-                item["name"].as_str().unwrap_or(""),
-                item["detail"].as_str().unwrap_or("")
-            ));
-        }
-        lines.push(String::new());
-    }
-    lines.push("## Explore".into());
-    lines.push(String::new());
-    lines.push("Open `report.html` in a browser. Search and sort the full index.".into());
-    lines.push("JSON tables are in `data/`. Symbol bodies stay in SQLite.".into());
-    lines.push("Then run `dued report`, `dued rank`, `dued issues`, `dued dead`, or `dued slice <symbol>`.".into());
-    lines.push(String::new());
-    lines.join("\n")
 }
 
 fn review_questions(order: &[Value], dead: &[Value], issues: &[Value]) -> Vec<String> {

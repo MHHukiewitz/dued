@@ -39,7 +39,7 @@ Speed helper:
 DUED_STUB_EMBED=1 python3 scripts/bench_bindings.py
 ```
 
-Those scripts wipe `.dued/` on the target they measure. Do not point them at an index you need unless the script stashes it first.
+Those scripts wipe `dued/` on the target they measure. Do not point them at an index you need unless the script stashes it first.
 
 ## Project map
 

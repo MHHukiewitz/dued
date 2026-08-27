@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -30,11 +31,16 @@ def test_analyze_writes_reports(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     dest = Path(payload["report"])
-    assert (dest / "brief.md").is_file()
+    assert dest.parent.name == "dued"
+    assert (repo / "dued" / "index.sqlite").is_file()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(_\d+)?", dest.name)
     assert (dest / "agent.json").is_file()
-    assert (dest / "reading_order.md").is_file()
-    assert (dest / "questions.md").is_file()
+    assert (dest / "index.json").is_file()
+    assert (dest / "review.json").is_file()
     assert (dest / "heatmap.svg").is_file()
+    assert not (dest / "brief.md").exists()
+    assert not (dest / "reading_order.md").exists()
+    assert not (dest / "questions.md").exists()
     assert (dest / "report.html").is_file()
     html = (dest / "report.html").read_text(encoding="utf-8")
     assert "Reading order" in html
@@ -52,7 +58,8 @@ def test_analyze_writes_reports(tmp_path: Path) -> None:
     assert shown.exit_code == 0, shown.output
     assert "dued report" in shown.output
     assert "HTML report" in shown.output
-    latest = dest.parent / "latest"
-    assert latest.is_symlink() or latest.is_dir()
+    assert not (dest.parent / "latest").exists()
+    stamps = [p for p in dest.parent.iterdir() if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(_\d+)?", p.name)]
+    assert stamps == [dest]
     label = runner.invoke(app, ["--repo", str(repo), "--quiet", "--json", "label"])
     assert label.exit_code == 0, label.output

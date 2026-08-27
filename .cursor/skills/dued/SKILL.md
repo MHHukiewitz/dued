@@ -7,7 +7,7 @@ description: Run the dued due-diligence CLI and read its report files for Python
 
 Use the `dued` CLI. Do not add an MCP server.
 
-The published CLI is the Python package: `pip install dued`. It is a binding layer over the Rust engine. Import `dued.walk`, `dued.parse`, `dued.scan`, and the other modules from Python. The command writes `.dued/` and `dued-reports/`.
+The published CLI is the Python package: `pip install dued`. It is a binding layer over the Rust engine. Import `dued.walk`, `dued.parse`, `dued.scan`, and the other modules from Python. The command writes `dued/` (index and reports).
 
 ## First pass
 
@@ -27,7 +27,7 @@ Tests must not download models:
 DUED_STUB_EMBED=1 dued analyze --repo <path> --no-embed --no-git --quiet --json
 ```
 
-Read `dued-reports/latest/agent.json` first. Then read `brief.md` and `reading_order.md`. Open `report.html` in a browser to search and sort the full index. JSON tables are in `dued-reports/latest/data/`. Use `dued report` to rebuild the HTML explorer from the SQLite index. It does not scan again.
+Read the newest `dued/<stamp>/agent.json` first. Open `report.html` in that folder to search and sort the full index. JSON tables are in `data/`. Use `dued report` to rebuild the HTML explorer from the SQLite index. It does not scan again.
 
 ## Next queries
 

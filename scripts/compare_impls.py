@@ -66,12 +66,12 @@ def compare_fixture() -> dict:
     py_dead = {f"{x['relpath']}::{x['name']}" for x in query(PY, work, "dead")["symbols"]}
     py_rank = [f"{x['relpath']}::{x['name']}" for x in query(PY, work, "rank", "--limit", "10")]
     py_slice = query(PY, work, "slice", "get_user")
-    py_syms = symbol_set(work, ".dued")
+    py_syms = symbol_set(work, "dued")
     rs, rs_t = analyze(RS, work, [])
     rs_dead = {f"{x['relpath']}::{x['name']}" for x in query(RS, work, "dead")["symbols"]}
     rs_rank = [f"{x['relpath']}::{x['name']}" for x in query(RS, work, "rank", "--limit", "10")]
     rs_slice = query(RS, work, "slice", "get_user")
-    rs_syms = symbol_set(work, ".dued")
+    rs_syms = symbol_set(work, "dued")
     return {
         "counts": {
             "python": {"files": py["files"], "symbols": py["symbols"], "edges": py["edges"], "hollow": py["hollow"]},
@@ -99,11 +99,12 @@ def bench_repo() -> dict:
     py_last: dict | None = None
     rs_last: dict | None = None
     for _ in range(3):
+        shutil.rmtree(ROOT / "dued", ignore_errors=True)
         shutil.rmtree(ROOT / ".dued", ignore_errors=True)
         shutil.rmtree(ROOT / ".dued-rs", ignore_errors=True)
         py_last, pt = analyze(PY, ROOT, [])
         py_times.append(pt)
-        shutil.rmtree(ROOT / ".dued", ignore_errors=True)
+        shutil.rmtree(ROOT / "dued", ignore_errors=True)
         rs_last, rt = analyze(RS, ROOT, [])
         rs_times.append(rt)
     assert py_last is not None
@@ -131,7 +132,7 @@ def main() -> None:
     py_mean = report["repo"]["repo_seconds"]["python_mean"]
     rs_mean = report["repo"]["repo_seconds"]["rust_mean"]
     report["speedup"] = round(py_mean / rs_mean, 3) if rs_mean else None
-    dest = ROOT / "dued-reports" / "compare.json"
+    dest = ROOT / "dued" / "compare.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

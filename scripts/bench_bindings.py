@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 PY = ROOT / ".venv" / "bin" / "dued"
 RS = ROOT / "dued-rs" / "target" / "release" / "dued"
 FIXTURE = ROOT / "tests" / "fixtures" / "mini"
-OUT = ROOT / "dued-reports" / "bindings-bench.json"
+OUT = ROOT / "dued" / "bindings-bench.json"
 RUNS = 3
 MAINNET = Path("/Users/mikehenry/Workspace/Fun/Mainnet")
-STASH_NAMES = (".dued", ".dued-rs")
+STASH_NAMES = ("dued", ".dued", ".dued-rs")
 
 
 def run(cmd: list[str], cwd: Path) -> tuple[dict, float]:
@@ -33,6 +33,7 @@ def run(cmd: list[str], cwd: Path) -> tuple[dict, float]:
 
 
 def wipe(repo: Path) -> None:
+    shutil.rmtree(repo / "dued", ignore_errors=True)
     shutil.rmtree(repo / ".dued", ignore_errors=True)
     shutil.rmtree(repo / ".dued-rs", ignore_errors=True)
 

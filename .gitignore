@@ -1,5 +1,6 @@
 .env
 .env.*
+/dued/
 .dued/
 .dued-rs/
 dued-reports/

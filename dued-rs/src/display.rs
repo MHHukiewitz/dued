@@ -70,8 +70,7 @@ pub fn print_analyze(data: &Value) {
         let html = Path::new(report).join("report.html");
         println!("Reports");
         println!("  HTML     {}", html.display());
-        println!("  brief    {}/brief.md", report);
-        println!("  latest   {}", Path::new(report).parent().unwrap_or(Path::new(".")).join("latest").display());
+        println!("  folder   {report}");
         println!();
         println!("Explore");
         println!("  open the HTML file in a browser");

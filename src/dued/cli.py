@@ -16,7 +16,7 @@ from dued.issues import list_issues
 from dued.embed import DEFAULT_MODEL, export_label_csv, similar_to
 from dued.git_hist import analyze_history, history_report
 from dued.names import analyze_names
-from dued.paths import db_path, report_root
+from dued.paths import db_path, ensure_report_dir
 from dued.profile import ingest_profile, launch_or_attach
 from dued.progress import ProgressUI, progress_session
 from dued.rank import compute_rank, reading_order
@@ -28,7 +28,7 @@ from dued.store import connect
 
 app = typer.Typer(
     help="Local due-diligence for Python, TypeScript, and Rust repos.",
-    epilog="Typical first pass: dued analyze   then open dued-reports/latest/report.html   then dued report",
+    epilog="Typical first pass: dued analyze   then open the printed HTML path   then dued report",
     no_args_is_help=True,
 )
 
@@ -71,7 +71,7 @@ def scan(
     git: bool = typer.Option(False, "--git", help="Overlay git churn and coupling."),
     no_embed: bool = typer.Option(False, "--no-embed", help="Skip embeddings (tests only)."),
 ) -> None:
-    """Walk, parse, measure, rank, and write .dued/index.sqlite.
+    """Walk, parse, measure, rank, and write dued/index.sqlite.
 
     This writes the index only. Use analyze for the HTML report pack.
     """
@@ -119,8 +119,7 @@ def slice(
     with progress_session(ctx.obj["quiet"]) as ui:
         task = ui.add("slice", 1)
         data = slice_symbol(conn, symbol, depth=depth)
-        dest = report_root(ctx.obj["repo"]) / "latest"
-        dest.mkdir(parents=True, exist_ok=True)
+        dest = ensure_report_dir(ctx.obj["repo"])
         files = set(data.get("files") or [])
         if files:
             write_heatmap(conn, dest / "slice-heatmap.svg", slice_files=files)
@@ -203,8 +202,7 @@ def history(ctx: typer.Context) -> None:
 def heatmap(ctx: typer.Context) -> None:
     """Write SVG and HTML treemap heatmaps."""
     repo = ctx.obj["repo"]
-    dest = report_root(repo) / "latest"
-    dest.mkdir(parents=True, exist_ok=True)
+    dest = ensure_report_dir(repo)
     conn = connect(repo)
     with progress_session(ctx.obj["quiet"]) as ui:
         task = ui.add("heatmap", 1)
@@ -241,8 +239,7 @@ def profile(
 ) -> None:
     """Launch or attach a profiler, then ingest the result."""
     repo = ctx.obj["repo"]
-    dest = report_root(repo) / "latest"
-    dest.mkdir(parents=True, exist_ok=True)
+    dest = ensure_report_dir(repo)
     out = dest / "profile.speedscope.json"
     conn = connect(repo)
     with progress_session(ctx.obj["quiet"]) as ui:
@@ -266,7 +263,7 @@ def analyze(
     """Full due-diligence pack: scan, reports, HTML, and review brief.
 
     Progress prints on stderr. The first Jina load can take several minutes.
-    After it finishes, open dued-reports/latest/report.html to search the full index.
+    After it finishes, open the printed report.html path to search the full index.
     """
     repo = ctx.obj["repo"]
     if not ctx.obj["quiet"]:
@@ -327,8 +324,7 @@ def review(
 ) -> None:
     """Write a human review pack from the current index."""
     repo = ctx.obj["repo"]
-    dest = report_root(repo) / "latest"
-    dest.mkdir(parents=True, exist_ok=True)
+    dest = ensure_report_dir(repo)
     conn = connect(repo)
     with progress_session(ctx.obj["quiet"]) as ui:
         task = ui.add("review pack", 1)
@@ -345,7 +341,7 @@ def label(
 ) -> None:
     """Export mismatch flags as a CSV for later human scoring / LoRA."""
     repo = ctx.obj["repo"]
-    out = dest or (report_root(repo) / "latest" / "labels.csv")
+    out = dest or (ensure_report_dir(repo) / "labels.csv")
     conn = connect(repo)
     with progress_session(ctx.obj["quiet"]) as ui:
         task = ui.add("export labels", 1)

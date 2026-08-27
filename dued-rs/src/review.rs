@@ -68,22 +68,6 @@ pub fn review_pack(conn: &Connection, dest: &Path, slice_query: Option<&str>) ->
     if let Some(q) = slice_query {
         pack["behavior"] = slice_symbol(conn, q, 4);
     }
-    let mut reading = String::from("# Guided reading order\n\n");
-    for (i, item) in order.iter().enumerate() {
-        reading.push_str(&format!(
-            "{}. `{}::{}` — {}\n",
-            i + 1,
-            item["relpath"].as_str().unwrap_or(""),
-            item["name"].as_str().unwrap_or(""),
-            item["why"].as_str().unwrap_or("")
-        ));
-    }
-    fs::write(dest.join("reading_order.md"), reading).ok();
-    let qmd = format!(
-        "# Review questions\n\n{}\n",
-        questions.iter().map(|q| format!("- {q}")).collect::<Vec<_>>().join("\n")
-    );
-    fs::write(dest.join("questions.md"), qmd).ok();
     fs::write(dest.join("review.json"), serde_json::to_string_pretty(&pack).unwrap()).ok();
     dest.to_path_buf()
 }

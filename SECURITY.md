@@ -11,7 +11,7 @@ Report a vulnerability when `dued` can:
 - Read files outside the target repository during a normal scan
 - Execute untrusted code from the scanned repository
 - Exfiltrate source or credentials
-- Write outside `.dued/` and `dued-reports/` without a documented command
+- Write outside `dued/` without a documented command
 
 Do not file a public GitHub issue for these reports.
 

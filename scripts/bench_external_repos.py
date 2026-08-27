@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY = ROOT / ".venv" / "bin" / "dued"
 RS = ROOT / "dued-rs" / "target" / "release" / "dued"
-OUT = ROOT / "dued-reports" / "big-repos.json"
+OUT = ROOT / "dued" / "big-repos.json"
 
 REPOS = [
     ("Mainnet", Path("/Users/mikehenry/Workspace/Fun/Mainnet")),
@@ -70,18 +70,19 @@ def symbol_keys(repo: Path, index_dir: str) -> set[tuple[str, str, int, int, int
 
 def compare_one(name: str, repo: Path) -> dict:
     print(f"== {name} ==", flush=True)
+    shutil.rmtree(repo / "dued", ignore_errors=True)
     shutil.rmtree(repo / ".dued", ignore_errors=True)
     shutil.rmtree(repo / ".dued-rs", ignore_errors=True)
     py, py_t = analyze(PY, repo)
     print(f"  python {py_t:.2f}s files={py.get('files')} symbols={py.get('symbols')} edges={py.get('edges')}", flush=True)
     py_dead = {f"{x['relpath']}::{x['name']}" for x in query(PY, repo, "dead")["symbols"]}
     py_rank = [f"{x['relpath']}::{x['name']}" for x in query(PY, repo, "rank", "--limit", "10")]
-    py_syms = symbol_keys(repo, ".dued")
+    py_syms = symbol_keys(repo, "dued")
     rs, rs_t = analyze(RS, repo)
     print(f"  rust   {rs_t:.2f}s files={rs.get('files')} symbols={rs.get('symbols')} edges={rs.get('edges')}", flush=True)
     rs_dead = {f"{x['relpath']}::{x['name']}" for x in query(RS, repo, "dead")["symbols"]}
     rs_rank = [f"{x['relpath']}::{x['name']}" for x in query(RS, repo, "rank", "--limit", "10")]
-    rs_syms = symbol_keys(repo, ".dued")
+    rs_syms = symbol_keys(repo, "dued")
     only_py = sorted(list(py_syms - rs_syms))[:15]
     only_rs = sorted(list(rs_syms - py_syms))[:15]
     return {

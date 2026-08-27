@@ -12,7 +12,7 @@ dued._native (PyO3)
 dued-rs engine (Rust, SQLite, tree-sitter, ONNX)
 ```
 
-The Python package is what you install from PyPI. Each `dued.*` module calls the Rust extension. The Rust crate also builds a native `dued` binary for local work. Both write `.dued/` and `dued-reports/`.
+The Python package is what you install from PyPI. Each `dued.*` module calls the Rust extension. The Rust crate also builds a native `dued` binary for local work. Both write `dued/` (index and reports).
 
 ## Scan pipeline
 

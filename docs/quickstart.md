@@ -16,14 +16,16 @@ When the run ends, stdout is a short text summary. Pass `--json` for machine-rea
 Open:
 
 ```text
-dued-reports/latest/report.html
+dued/YYYY-MM-DD_HH-MM-SS/report.html
 ```
+
+`dued analyze` prints that path. There is no `latest` folder.
 
 The HTML explorer includes the compact catalog: files, symbols, issues, names, clones, and reading order.
 
 ## After the first scan
 
-These commands read `.dued/index.sqlite`. They do not walk the tree again.
+These commands read `dued/index.sqlite`. They do not walk the tree again.
 
 ```bash
 dued report
@@ -58,9 +60,8 @@ dued --quiet --json analyze --no-embed --no-git
 ## Agent workflow
 
 1. Run `dued analyze --quiet --json`.
-2. Read `dued-reports/latest/agent.json`.
-3. Read `brief.md` and `reading_order.md`.
-4. Open `report.html` to search and sort.
-5. Use `dued slice <symbol>` before you change behavior.
+2. Read `dued/<stamp>/agent.json`.
+3. Open `report.html` in that folder to search and sort.
+4. Use `dued slice <symbol>` before you change behavior.
 
 A Cursor playbook lives in [`.cursor/skills/dued/SKILL.md`](../.cursor/skills/dued/SKILL.md).

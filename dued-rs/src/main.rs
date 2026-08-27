@@ -10,7 +10,7 @@ use dued_rs::git_hist::{analyze_history, history_report};
 use dued_rs::heatmap::write_heatmap;
 use dued_rs::issues::list_issues;
 use dued_rs::names::analyze_names;
-use dued_rs::paths::{db_path, report_root};
+use dued_rs::paths::{db_path, ensure_report_dir};
 use dued_rs::profile::{ingest_profile, launch_or_attach};
 use dued_rs::progress::{banner, note, set_quiet, stage};
 use dued_rs::rank::{compute_rank, reading_order};
@@ -30,7 +30,7 @@ use serde_json::{json, Value};
     long_about = "dued walks a repository, builds a local SQLite index, and ranks what to read first.\n\
 It does not send source code to a third-party analysis API. Embeddings run on this machine.\n\
 The published CLI is pip install dued.\n\n\
-Typical first pass:\n  dued analyze\n  open dued-reports/latest/report.html\n  dued report\n\n\
+Typical first pass:\n  dued analyze\n  open the HTML path printed at the end\n  dued report\n\n\
 After analyze, rebuild the HTML explorer or query the index without scanning again:\n  dued report | rank | issues | dead | names | cluster | slice <symbol>",
     after_help = "Examples:\n  dued analyze\n  dued analyze --no-git --no-embed\n  dued report\n  dued slice get_user\n  dued --repo /path/to/repo rank --limit 20"
 )]
@@ -87,7 +87,7 @@ enum Commands {
     },
     /// Git churn, coupling, and bus factor. Refines rank.
     History,
-    /// Write SVG and HTML treemap heatmaps into the latest report folder.
+    /// Write SVG and HTML treemap heatmaps into the newest report folder.
     Heatmap,
     /// Overlay an existing speedscope or CPU profile on the index.
     IngestProfile {
@@ -170,8 +170,7 @@ fn main() -> ExitCode {
         Commands::Slice { symbol, depth } => {
             let conn = connect(&repo);
             let data = slice_symbol(&conn, &symbol, depth);
-            let dest = report_root(&repo).join("latest");
-            std::fs::create_dir_all(&dest).ok();
+            let dest = ensure_report_dir(&repo);
             if let Some(files) = data["files"].as_array() {
                 let names: Vec<String> = files.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
                 if !names.is_empty() {
@@ -211,8 +210,7 @@ fn main() -> ExitCode {
             emit(&report, as_json);
         }
         Commands::Heatmap => {
-            let dest = report_root(&repo).join("latest");
-            std::fs::create_dir_all(&dest).ok();
+            let dest = ensure_report_dir(&repo);
             let conn = connect(&repo);
             emit(&write_heatmap(&conn, &dest.join("heatmap.svg"), None), as_json);
         }
@@ -228,8 +226,7 @@ fn main() -> ExitCode {
             duration,
             command,
         } => {
-            let dest = report_root(&repo).join("latest");
-            std::fs::create_dir_all(&dest).ok();
+            let dest = ensure_report_dir(&repo);
             let out = dest.join("profile.speedscope.json");
             match launch_or_attach(&repo, &lang, pid, &command, &out, duration) {
                 Ok(path) => {
@@ -293,14 +290,13 @@ fn main() -> ExitCode {
             }
         }
         Commands::Review { symbol } => {
-            let dest = report_root(&repo).join("latest");
-            std::fs::create_dir_all(&dest).ok();
+            let dest = ensure_report_dir(&repo);
             let conn = connect(&repo);
             review_pack(&conn, &dest, symbol.as_deref());
             emit(&json!({"report": dest.display().to_string()}), as_json);
         }
         Commands::Label { dest } => {
-            let out = dest.unwrap_or_else(|| report_root(&repo).join("latest").join("labels.csv"));
+            let out = dest.unwrap_or_else(|| ensure_report_dir(&repo).join("labels.csv"));
             let conn = connect(&repo);
             let count = export_label_csv(&conn, &out);
             emit(&json!({"rows": count, "path": out.display().to_string()}), as_json);

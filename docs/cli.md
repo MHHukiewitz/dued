@@ -36,7 +36,7 @@ Full pack: scan, reports, HTML explorer, and review files.
 
 ## `dued scan`
 
-Write `.dued/index.sqlite` only. No report pack.
+Write `dued/index.sqlite` only. No report pack.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -96,7 +96,7 @@ Mine git churn, coupling, and bus factor. Refines rank.
 
 ## `dued heatmap`
 
-Write SVG and HTML treemap heatmaps under `dued-reports/latest/`.
+Write SVG and HTML treemap heatmaps under the newest dated pack in `dued/`.
 
 ## `dued review`
 
@@ -138,7 +138,7 @@ Export mismatch flags as CSV.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--out PATH` | `dued-reports/latest/labels.csv` | Output file |
+| `--out PATH` | newest `dued/<stamp>/labels.csv` | Output file |
 
 ## `dued index-path`
 

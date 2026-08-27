@@ -7,6 +7,7 @@ use walkdir::WalkDir;
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
+    "dued",
     ".dued",
     ".dued-rs",
     "dued-reports",
