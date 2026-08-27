@@ -171,11 +171,34 @@ pub fn print_slice(data: &Value) {
     println!("Behavior slice");
     println!();
     kv("query", &data["query"]);
+    if let Some(err) = data["error"].as_str() {
+        println!("  {:<18} {}", "error", err);
+        if let Some(candidates) = data["candidates"].as_array() {
+            if !candidates.is_empty() {
+                println!();
+                println!("Candidates (use path::name)");
+                for item in candidates.iter().take(20) {
+                    println!(
+                        "  {}::{}",
+                        item["relpath"].as_str().unwrap_or(""),
+                        item["name"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+        return;
+    }
     kv("blast radius", &data["blast_radius"]);
     if let Some(effects) = data["effects"].as_array() {
         let tags: Vec<&str> = effects.iter().filter_map(|e| e.as_str()).collect();
         if !tags.is_empty() {
             println!("  {:<18} {}", "effects", tags.join(", "));
+        }
+    }
+    if let Some(unresolved) = data["unresolved_callees"].as_array() {
+        let tags: Vec<&str> = unresolved.iter().filter_map(|e| e.as_str()).take(12).collect();
+        if !tags.is_empty() {
+            println!("  {:<18} {}", "unresolved", tags.join(", "));
         }
     }
     println!();
