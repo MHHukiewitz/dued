@@ -19,7 +19,7 @@ def _copy_fixture(repo: Path) -> None:
             (repo / src.name).write_bytes(src.read_bytes())
 
 
-def _scan(repo: Path) -> None:
+def _scan(repo: Path, *, min_files: int = 1) -> dict:
     os.environ["DUED_STUB_EMBED"] = "1"
     ui = ProgressUI(quiet=True)
     summary = run_scan(
@@ -31,13 +31,14 @@ def _scan(repo: Path) -> None:
         with_git=False,
         with_embed=False,
     )
-    assert summary["files"] >= 4
+    assert summary["files"] >= min_files
+    return summary
 
 
 def test_unique_name_slice_not_polluted_by_common_methods(tmp_path: Path) -> None:
     repo = tmp_path / "slice_collision"
     _copy_fixture(repo)
-    _scan(repo)
+    _scan(repo, min_files=4)
     conn = connect(repo)
 
     for query in ("sync_graph_access_layers", "apply_op"):
@@ -64,7 +65,7 @@ def test_unique_name_slice_not_polluted_by_common_methods(tmp_path: Path) -> Non
 def test_ambiguous_common_name_requires_path_qualification(tmp_path: Path) -> None:
     repo = tmp_path / "slice_collision_ambiguous"
     _copy_fixture(repo)
-    _scan(repo)
+    _scan(repo, min_files=4)
     conn = connect(repo)
     sliced = slice_symbol(conn, "new")
     assert sliced.get("error") == "ambiguous symbol name; qualify as path::name"
@@ -94,7 +95,7 @@ def test_ambiguous_non_generic_does_not_union_targets(tmp_path: Path) -> None:
         "pub fn process() -> i32 {\n    let _ = std::fs::read_to_string(\"/tmp/x\");\n    2\n}\n",
         encoding="utf-8",
     )
-    _scan(repo)
+    _scan(repo, min_files=2)
     conn = connect(repo)
     sliced = slice_symbol(conn, "unique_entry")
     assert "error" not in sliced, sliced

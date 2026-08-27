@@ -25,9 +25,12 @@ def test_scan_rank_dead_slice(tmp_path: Path) -> None:
     dead = dead_symbols(conn)
     dead_names = {row["name"] for row in dead}
     assert "unused_helper" in dead_names
-    sliced = slice_symbol(conn, "get_user")
+    sliced = slice_symbol(conn, "lib.rs::get_user")
+    assert "error" not in sliced, sliced
     assert sliced["blast_radius"] >= 1
     assert "filesystem" in sliced["effects"] or sliced["symbols"]
+    ambiguous = slice_symbol(conn, "get_user")
+    assert ambiguous.get("error") == "ambiguous symbol name; qualify as path::name"
     conn.close()
     again = run_scan(repo, ui, max_files=None, budget_seconds=None, model_name="stub", with_git=False, with_embed=True)
     assert again["reused"] == 3
