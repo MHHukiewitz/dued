@@ -11,11 +11,40 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
     if matches.is_empty() {
         return json!({"query": query, "error": "symbol not found", "symbols": []});
     }
+    // Bare-name queries that hit multiple symbols must stay explicit. Expanding the first
+    // match silently turns `slice new` into an arbitrary root and a huge blast radius.
+    if matches.len() > 1 && !query.contains("::") {
+        let candidates: Vec<Value> = matches
+            .iter()
+            .map(|m| {
+                json!({
+                    "name": m["name"],
+                    "relpath": m["relpath"],
+                    "signature": m["signature"],
+                    "start_line": m.get("start_line").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        return json!({
+            "query": query,
+            "error": "ambiguous symbol name; qualify as path::name",
+            "candidates": candidates,
+            "symbols": [],
+            "files": [],
+            "effects": [],
+            "blast_radius": 0,
+            "callers": [],
+            "tests": [],
+            "taint": {"sinks": [], "params": [], "params_may_reach_sinks": []},
+            "cost_hint": 0,
+        });
+    }
     let root = matches[0].clone();
     let mut seen = HashSet::new();
     let mut queue = VecDeque::new();
     queue.push_back((root["id"].as_i64().unwrap(), 0));
     let mut nodes = Vec::new();
+    let mut unresolved_callees: Vec<String> = Vec::new();
     while let Some((sid, d)) = queue.pop_front() {
         if seen.contains(&sid) || d > depth {
             continue;
@@ -66,19 +95,26 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
             .unwrap()
             .flatten()
         {
-            if let Some(dst_file) = edge.1 {
-                let mut dstmt = conn.prepare("SELECT id FROM symbols WHERE name = ? AND file_id = ?").unwrap();
-                for dest in dstmt.query_map(params![edge.0, dst_file], |r| r.get::<_, i64>(0)).unwrap().flatten() {
-                    queue.push_back((dest, d + 1));
-                }
-            } else {
-                let mut dstmt = conn.prepare("SELECT id FROM symbols WHERE name = ?").unwrap();
-                for dest in dstmt.query_map([&edge.0], |r| r.get::<_, i64>(0)).unwrap().flatten() {
-                    queue.push_back((dest, d + 1));
-                }
+            // Unresolved edges keep dst_file_id NULL on purpose (generic / ambiguous callees).
+            // Do not fan out to every same-named symbol in the index — that pollutes unique-name slices.
+            let Some(dst_file) = edge.1 else {
+                unresolved_callees.push(edge.0);
+                continue;
+            };
+            let mut dstmt = conn
+                .prepare("SELECT id FROM symbols WHERE name = ? AND file_id = ?")
+                .unwrap();
+            for dest in dstmt
+                .query_map(params![edge.0, dst_file], |r| r.get::<_, i64>(0))
+                .unwrap()
+                .flatten()
+            {
+                queue.push_back((dest, d + 1));
             }
         }
     }
+    unresolved_callees.sort();
+    unresolved_callees.dedup();
     let root_name = root["name"].as_str().unwrap_or("");
     let root_file = root["file_id"].as_i64().unwrap_or(0);
     let mut cstmt = conn
@@ -86,7 +122,7 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
             r#"
         SELECT s.name, f.relpath, s.start_line
         FROM edges e JOIN symbols s ON s.id = e.src_symbol_id JOIN files f ON f.id = s.file_id
-        WHERE e.dst_name = ? AND e.kind = 'call' AND (e.dst_file_id = ? OR e.dst_file_id IS NULL)
+        WHERE e.dst_name = ? AND e.kind = 'call' AND e.dst_file_id = ?
         "#,
         )
         .unwrap();
@@ -130,6 +166,7 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
         "files": files,
         "effects": all_effects,
         "blast_radius": files.len(),
+        "unresolved_callees": unresolved_callees,
         "tests": tests,
         "taint": taint,
         "cost_hint": cost,
@@ -141,7 +178,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
         let mut stmt = conn
             .prepare(
                 r#"
-            SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath
+            SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath, s.start_line
             FROM symbols s JOIN files f ON f.id = s.file_id
             WHERE f.relpath = ? AND s.name = ?
             "#,
@@ -156,6 +193,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
                     "body": r.get::<_, String>(3)?,
                     "file_id": r.get::<_, i64>(4)?,
                     "relpath": r.get::<_, String>(5)?,
+                    "start_line": r.get::<_, i64>(6)?,
                 }))
             })
             .unwrap()
@@ -165,7 +203,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath
+        SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath, s.start_line
         FROM symbols s JOIN files f ON f.id = s.file_id
         WHERE s.name = ? ORDER BY f.relpath
         "#,
@@ -179,6 +217,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
             "body": r.get::<_, String>(3)?,
             "file_id": r.get::<_, i64>(4)?,
             "relpath": r.get::<_, String>(5)?,
+            "start_line": r.get::<_, i64>(6)?,
         }))
     })
     .unwrap()
@@ -238,4 +277,202 @@ fn taint_lite(body: &str, signature: &str, effects: &[String]) -> Value {
         .cloned()
         .collect();
     json!({"sinks": sinks, "params": params_list, "params_may_reach_sinks": reaching})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::connect;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_repo() -> std::path::PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let repo = std::env::temp_dir().join(format!("dued-slice-test-{nanos}"));
+        fs::create_dir_all(repo.join("dued")).unwrap();
+        repo
+    }
+
+    fn seed_collision_index(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'bridge.rs', 'rust', 'a', 40, 100, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'noise_a.rs', 'rust', 'b', 80, 200, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (3, 'noise_b.rs', 'rust', 'c', 80, 200, 0)",
+            [],
+        )
+        .unwrap();
+        // Unique entry that calls common method names (left unresolved on purpose).
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (1, 1, 'sync_graph_access_layers', 'function', 1, 20, 'fn sync_graph_access_layers()', '', 'fn sync_graph_access_layers() { ensure_graph_world(); new(); get(); as_str(); is_empty(); default(); }', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (2, 1, 'ensure_graph_world', 'function', 22, 30, 'fn ensure_graph_world()', '', 'fn ensure_graph_world() {}', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        // Same-file unique callee that should expand.
+        conn.execute(
+            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (1, 1, 1, 'ensure_graph_world', 'call')",
+            [],
+        )
+        .unwrap();
+        // Unresolved generic callees — previously exploded the slice.
+        for name in ["new", "get", "as_str", "is_empty", "default"] {
+            conn.execute(
+                "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (1, 1, NULL, ?1, 'call')",
+                params![name],
+            )
+            .unwrap();
+        }
+        // Noise: many same-named methods with heavy effects in other files.
+        let noise: &[(&str, i64, i64, &str)] = &[
+            ("new", 2, 10, "[\"filesystem\"]"),
+            ("default", 2, 11, "[\"network\"]"),
+            ("get", 2, 12, "[\"process\"]"),
+            ("as_str", 2, 13, "[\"unsafe\"]"),
+            ("is_empty", 2, 14, "[\"global_mutate\"]"),
+            ("new", 3, 15, "[\"filesystem\"]"),
+            ("get", 3, 16, "[\"network\"]"),
+        ];
+        for (i, (name, file_id, line, effects)) in noise.iter().enumerate() {
+            let id = 100 + i as i64;
+            conn.execute(
+                "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+                 VALUES (?1, ?2, ?3, 'method', ?4, ?4, ?5, '', '', 1, 1, 0, 0, 1, 0, 0, ?6)",
+                params![id, file_id, name, line, format!("fn {name}()"), effects],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn unique_name_slice_ignores_unresolved_generic_callees() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        seed_collision_index(&conn);
+        let sliced = slice_symbol(&conn, "sync_graph_access_layers", 4);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        let names: Vec<&str> = sliced["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["sync_graph_access_layers", "ensure_graph_world"]);
+        assert_eq!(sliced["blast_radius"], 1);
+        let effects = sliced["effects"].as_array().unwrap();
+        assert!(effects.is_empty(), "unexpected effects from noise methods: {effects:?}");
+        let unresolved = sliced["unresolved_callees"].as_array().unwrap();
+        let unresolved: Vec<&str> = unresolved.iter().filter_map(|v| v.as_str()).collect();
+        assert!(unresolved.contains(&"new"));
+        assert!(unresolved.contains(&"default"));
+        assert!(unresolved.contains(&"get"));
+        assert!(unresolved.contains(&"as_str"));
+        assert!(unresolved.contains(&"is_empty"));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn ambiguous_bare_name_requires_qualification() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        seed_collision_index(&conn);
+        let sliced = slice_symbol(&conn, "new", 4);
+        assert_eq!(
+            sliced["error"].as_str().unwrap(),
+            "ambiguous symbol name; qualify as path::name"
+        );
+        assert!(sliced["candidates"].as_array().unwrap().len() >= 2);
+        assert_eq!(sliced["blast_radius"], 0);
+
+        let qualified = slice_symbol(&conn, "noise_a.rs::new", 1);
+        assert!(qualified.get("error").is_none(), "{qualified}");
+        let names: Vec<&str> = qualified["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["new"]);
+        assert_eq!(qualified["root"]["relpath"], "noise_a.rs");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn same_file_resolved_generic_still_expands() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'bridge.rs', 'rust', 'a', 40, 100, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'noise.rs', 'rust', 'b', 80, 200, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (1, 1, 'apply_op', 'function', 1, 10, 'fn apply_op()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (2, 1, 'new', 'method', 12, 20, 'fn new()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (3, 2, 'new', 'method', 1, 30, 'fn new()', '', 'fs::read', 1, 1, 0, 0, 1, 0, 0, '[\"filesystem\"]')",
+            [],
+        )
+        .unwrap();
+        // Resolved same-file generic (what choose_call_targets returns for unique in-file new).
+        conn.execute(
+            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (1, 1, 1, 'new', 'call')",
+            [],
+        )
+        .unwrap();
+        // Unresolved cross-file generic must not expand.
+        conn.execute(
+            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (1, 1, NULL, 'get', 'call')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (4, 2, 'get', 'method', 40, 50, 'fn get()', '', '', 1, 1, 0, 0, 1, 0, 0, '[\"network\"]')",
+            [],
+        )
+        .unwrap();
+
+        let sliced = slice_symbol(&conn, "apply_op", 4);
+        let names: Vec<&str> = sliced["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["apply_op", "new"]);
+        assert_eq!(sliced["root"]["relpath"], "bridge.rs");
+        assert_eq!(sliced["blast_radius"], 1);
+        let effects = sliced["effects"].as_array().unwrap();
+        assert!(effects.is_empty(), "{effects:?}");
+        let _ = fs::remove_dir_all(&repo);
+    }
 }

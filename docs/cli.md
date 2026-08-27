@@ -64,7 +64,11 @@ Print the PageRank reading order.
 
 Show the behavior slice, effects, and blast radius.
 
-Pass a name, or `path::name` when the name appears more than once.
+Pass a unique name. When the bare name matches more than one symbol, the command
+returns an ambiguity error with candidates. Qualify as `path::name`.
+
+Unresolved call edges (generic or ambiguous callees such as `new` / `get`) stay
+listed under `unresolved_callees`. They do not expand the blast radius.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

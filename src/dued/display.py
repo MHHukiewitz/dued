@@ -161,11 +161,24 @@ def print_dead(data: dict) -> None:
 def print_slice(data: dict) -> None:
     console.print("[bold]Behavior slice[/bold]\n")
     console.print(f"  {'query':<18} {data.get('query', '')}")
+    if data.get("error"):
+        console.print(f"  {'error':<18} {data.get('error')}")
+        candidates = data.get("candidates") or []
+        if candidates:
+            console.print()
+            console.print("Candidates (use path::name)")
+            for item in candidates[:20]:
+                console.print(f"  {item.get('relpath')}::{item.get('name')}")
+        return
     console.print(f"  {'blast radius':<18} {data.get('blast_radius', '')}")
     effects = data.get("effects") or []
     if effects:
         tags = ", ".join(str(x) for x in effects)
         console.print(f"  {'effects':<18} {tags}")
+    unresolved = data.get("unresolved_callees") or []
+    if unresolved:
+        tags = ", ".join(str(x) for x in unresolved[:12])
+        console.print(f"  {'unresolved':<18} {tags}")
 
 
 def print_cluster(data: dict) -> None:
