@@ -50,3 +50,5 @@ Schema highlights:
 - `meta` — schema version, parser version, and scan metadata
 
 When the stored parser version does not match the engine, the next scan re-parses every walked file even if digests match. You do not need `--force` or a deleted index after a parse-rule upgrade.
+
+Do not commit `dued/` unless you have a reason to share an index.
