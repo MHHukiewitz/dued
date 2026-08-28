@@ -129,6 +129,9 @@ fn add(
 }
 
 pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
+    if limit <= 0 {
+        return Vec::new();
+    }
     let mut stmt = conn
         .prepare(
             r#"
@@ -137,21 +140,151 @@ pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
         LEFT JOIN files f ON f.id = i.file_id
         LEFT JOIN symbols s ON s.id = i.symbol_id
         ORDER BY i.score DESC
-        LIMIT ?
         "#,
         )
         .unwrap();
-    stmt.query_map([limit], |r| {
-        Ok(json!({
-            "kind": r.get::<_, String>(0)?,
-            "detail": r.get::<_, String>(1)?,
-            "score": r.get::<_, f64>(2)?,
-            "relpath": r.get::<_, Option<String>>(3)?,
-            "name": r.get::<_, Option<String>>(4)?,
-            "start_line": r.get::<_, Option<i64>>(5)?,
-        }))
-    })
-    .unwrap()
-    .flatten()
-    .collect()
+    let all: Vec<Value> = stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "kind": r.get::<_, String>(0)?,
+                "detail": r.get::<_, String>(1)?,
+                "score": r.get::<_, f64>(2)?,
+                "relpath": r.get::<_, Option<String>>(3)?,
+                "name": r.get::<_, Option<String>>(4)?,
+                "start_line": r.get::<_, Option<i64>>(5)?,
+            }))
+        })
+        .unwrap()
+        .flatten()
+        .collect();
+    select_per_kind(all, limit as usize)
+}
+
+/// Apply `limit` per kind (top N by score within each kind).
+/// Scores are not one scale across kinds, so a global LIMIT only returns
+/// `god_function` rows and hides `effect_in_core` / `shotgun_surgery`.
+fn select_per_kind(all: Vec<Value>, per_kind: usize) -> Vec<Value> {
+    use std::collections::HashMap;
+
+    if all.is_empty() || per_kind == 0 {
+        return Vec::new();
+    }
+
+    let mut kind_order: Vec<String> = Vec::new();
+    let mut by_kind: HashMap<String, Vec<Value>> = HashMap::new();
+    for item in all {
+        let kind = item["kind"].as_str().unwrap_or("").to_string();
+        if !kind_order.iter().any(|k| k == &kind) {
+            kind_order.push(kind.clone());
+        }
+        by_kind.entry(kind).or_default().push(item);
+    }
+
+    let mut out: Vec<Value> = Vec::new();
+    for kind in kind_order {
+        let Some(rows) = by_kind.get_mut(&kind) else {
+            continue;
+        };
+        // Already sorted by score DESC from the SQL ORDER BY.
+        let take = per_kind.min(rows.len());
+        out.extend(rows.drain(..take));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::connect;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_repo() -> std::path::PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let repo = std::env::temp_dir().join(format!("dued-issues-test-{nanos}"));
+        fs::create_dir_all(repo.join("dued")).unwrap();
+        repo
+    }
+
+    fn seed_crowded_issues(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'core/engine.py', 'python', 'a', 100, 200, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'ui/view.py', 'python', 'b', 40, 80, 0)",
+            [],
+        )
+        .unwrap();
+        for i in 0..50 {
+            conn.execute(
+                "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (NULL, 1, 'god_function', ?1, ?2)",
+                params![format!("god {i}"), 10000.0 - i as f64],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (NULL, 1, 'god_module', 'god module symbols=20', 50.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (NULL, 1, 'effect_in_core', 'I/O mixed into core', 20.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (NULL, 2, 'shotgun_surgery', 'core/engine.py <-> ui/view.py', 0.8)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_issues_includes_low_score_kinds_under_limit() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        seed_crowded_issues(&conn);
+        let listed = list_issues(&conn, 40);
+        let kinds: std::collections::HashSet<&str> = listed
+            .iter()
+            .filter_map(|row| row["kind"].as_str())
+            .collect();
+        assert!(kinds.contains("god_function"), "{kinds:?}");
+        assert!(kinds.contains("god_module"), "{kinds:?}");
+        assert!(kinds.contains("effect_in_core"), "{kinds:?}");
+        assert!(kinds.contains("shotgun_surgery"), "{kinds:?}");
+        let gods = listed.iter().filter(|r| r["kind"] == "god_function").count();
+        assert_eq!(gods, 40);
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|r| r["kind"] == "effect_in_core")
+                .count(),
+            1
+        );
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn select_per_kind_keeps_minority_kinds() {
+        let mut rows = Vec::new();
+        for i in 0..30 {
+            rows.push(json!({"kind": "god_function", "score": 10000.0 - i as f64, "detail": i}));
+        }
+        rows.push(json!({"kind": "god_module", "score": 50.0, "detail": "mod"}));
+        rows.push(json!({"kind": "effect_in_core", "score": 20.0, "detail": "io"}));
+        rows.push(json!({"kind": "shotgun_surgery", "score": 0.8, "detail": "pair"}));
+        let picked = select_per_kind(rows, 10);
+        let kinds: std::collections::HashSet<&str> = picked
+            .iter()
+            .filter_map(|row| row["kind"].as_str())
+            .collect();
+        assert_eq!(picked.iter().filter(|r| r["kind"] == "god_function").count(), 10);
+        assert!(kinds.contains("effect_in_core"));
+        assert!(kinds.contains("shotgun_surgery"));
+        assert!(kinds.contains("god_module"));
+        assert!(kinds.contains("god_function"));
+    }
 }
