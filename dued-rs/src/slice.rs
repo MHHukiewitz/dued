@@ -117,16 +117,16 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
     unresolved_callees.dedup();
     let root_name = root["name"].as_str().unwrap_or("");
     let root_file = root["file_id"].as_i64().unwrap_or(0);
-    // Unique names: also keep callers whose call edge left dst_file_id NULL.
-    // Issue #1 tightened callers to `dst_file_id = root` only; that dropped real
-    // cross-file callers (e.g. Game `impl` → imported crate fn) when resolution
-    // stored NULL. Outgoing BFS above still skips NULL — do not undo #1 blast fix.
-    // Ambiguous / path-qualified roots stay file-exact so NULL edges do not attach
-    // to every overload.
+    // Unique names (#7) and path-qualified roots (#24): also keep callers whose
+    // call edge left dst_file_id NULL. Issue #1 tightened callers to
+    // `dst_file_id = root` only; that dropped real cross-file callers when
+    // resolution stored NULL. Outgoing BFS above still skips NULL — do not undo
+    // #1 blast fix. Bare ambiguous names already return early above.
     let name_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM symbols WHERE name = ?", [root_name], |r| r.get(0))
         .unwrap_or(0);
-    let caller_sql = if name_count == 1 {
+    let include_null_callers = name_count == 1 || query.contains("::");
+    let caller_sql = if include_null_callers {
         r#"
         SELECT s.name, f.relpath, s.start_line
         FROM edges e JOIN symbols s ON s.id = e.src_symbol_id JOIN files f ON f.id = s.file_id
@@ -541,7 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_qualified_root_ignores_unresolved_callers() {
+    fn qualified_ambiguous_root_keeps_unresolved_cross_file_caller() {
+        // Two deploy_service symbols; caller edge left dst_file_id NULL (issue #24).
         let repo = temp_repo();
         let conn = connect(&repo);
         conn.execute(
@@ -561,35 +562,37 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
-             VALUES (1, 1, 'process', 'function', 1, 5, 'fn process()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+             VALUES (1, 1, 'deploy_service', 'function', 1, 5, 'fn deploy_service()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
-             VALUES (2, 2, 'process', 'function', 1, 5, 'fn process()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+             VALUES (2, 2, 'deploy_service', 'function', 1, 5, 'fn deploy_service()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
             [],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
-             VALUES (3, 3, 'entry', 'function', 1, 5, 'fn entry()', '', 'process()', 1, 1, 0, 0, 1, 0, 0, '[]')",
+             VALUES (3, 3, 'execute_deploy_service', 'function', 1, 5, 'fn execute_deploy_service()', '', 'deploy_service()', 1, 1, 0, 0, 1, 0, 0, '[]')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (3, 3, NULL, 'process', 'call')",
+            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (3, 3, NULL, 'deploy_service', 'call')",
             [],
         )
         .unwrap();
 
-        let sliced = slice_symbol(&conn, "a.rs::process", 1);
+        let sliced = slice_symbol(&conn, "a.rs::deploy_service", 1);
         assert!(sliced.get("error").is_none(), "{sliced}");
         let callers = sliced["callers"].as_array().unwrap();
+        let names: Vec<&str> = callers.iter().filter_map(|c| c["name"].as_str()).collect();
         assert!(
-            callers.is_empty(),
-            "ambiguous NULL caller must not attach to a qualified overload: {callers:?}"
+            names.contains(&"execute_deploy_service"),
+            "qualified root must keep NULL-edge caller: {callers:?}"
         );
+        assert_eq!(sliced["blast_radius"], 1);
         let _ = fs::remove_dir_all(&repo);
     }
 }

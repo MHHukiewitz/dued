@@ -40,7 +40,8 @@ def banner(repo: Path, command: str, with_embed: bool, with_git: bool, model: st
 
 def emit(data: object, as_json: bool) -> None:
     if as_json:
-        console.print(json.dumps(data, indent=2, default=str))
+        # Plain stdout: Rich soft-wrap inserts raw newlines inside JSON strings.
+        print(json.dumps(data, indent=2, default=str), flush=True)
         return
     if isinstance(data, dict):
         if "report" in data and "files" in data:
