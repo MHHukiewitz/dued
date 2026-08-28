@@ -12,7 +12,7 @@ fn effect_patterns() -> &'static [(&'static str, Regex)] {
             ("db", r"(?i)\b(execute\(|query\(|sqlite3|sqlalchemy|prisma|diesel|sqlx)\b"),
             ("process", r"\b(subprocess|os\.system|child_process|Command::|std::process)\b"),
             ("global_mutate", r"\bglobal\b|static mut\b"),
-            ("unsafe", r"\bunsafe\b|\bany\b|\beval\("),
+            ("unsafe", r"\bunsafe\b|\beval\("),
             ("panic", r"\b(unwrap\(|expect\(|panic!|raise |throw )\b"),
         ]
         .into_iter()
@@ -29,6 +29,25 @@ pub fn tag_effects(body: &str) -> Vec<String> {
         }
     }
     tags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tag_effects;
+
+    #[test]
+    fn iterator_any_is_not_unsafe() {
+        let body = "fn sitting_isp_kit_backhaul_floor(xs: &[u8]) -> bool { xs.iter().any(|x| *x > 0) }";
+        let tags = tag_effects(body);
+        assert!(!tags.iter().any(|t| t == "unsafe"), "{tags:?}");
+    }
+
+    #[test]
+    fn real_unsafe_block_is_tagged() {
+        let body = "fn poke(p: *const u8) -> u8 { unsafe { *p } }";
+        let tags = tag_effects(body);
+        assert!(tags.iter().any(|t| t == "unsafe"), "{tags:?}");
+    }
 }
 
 pub fn apply_effects(conn: &Connection) {
