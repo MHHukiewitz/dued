@@ -66,6 +66,19 @@ def delete_file_row(conn: Index, relpath: str) -> None:
     if row is None:
         return
     fid = row["id"]
+    conn.execute(
+        "DELETE FROM name_flags WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?)",
+        (fid,),
+    )
+    conn.execute(
+        "DELETE FROM clones WHERE symbol_a IN (SELECT id FROM symbols WHERE file_id = ?) "
+        "OR symbol_b IN (SELECT id FROM symbols WHERE file_id = ?)",
+        (fid, fid),
+    )
+    conn.execute(
+        "DELETE FROM issues WHERE file_id = ? OR symbol_id IN (SELECT id FROM symbols WHERE file_id = ?)",
+        (fid, fid),
+    )
     conn.execute("DELETE FROM call_facts WHERE src_file_id = ?", (fid,))
     conn.execute("DELETE FROM import_facts WHERE src_file_id = ?", (fid,))
     conn.execute("DELETE FROM edges WHERE src_file_id = ? OR dst_file_id = ?", (fid, fid))

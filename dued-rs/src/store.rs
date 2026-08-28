@@ -171,10 +171,98 @@ pub fn delete_file_row(conn: &Connection, relpath: &str) {
     let Some(fid) = id else {
         return;
     };
-    conn.execute("DELETE FROM call_facts WHERE src_file_id = ?", [fid]).ok();
-    conn.execute("DELETE FROM import_facts WHERE src_file_id = ?", [fid]).ok();
-    conn.execute("DELETE FROM edges WHERE src_file_id = ? OR dst_file_id = ?", params![fid, fid])
-        .ok();
-    conn.execute("DELETE FROM symbols WHERE file_id = ?", [fid]).ok();
-    conn.execute("DELETE FROM files WHERE id = ?", [fid]).ok();
+    // Child rows first. issues/name_flags/clones must go too, or a failed scan
+    // leaves JOIN nulls and a leftover files row can trip UNIQUE on rescan.
+    conn.execute(
+        "DELETE FROM name_flags WHERE symbol_id IN (SELECT id FROM symbols WHERE file_id = ?)",
+        [fid],
+    )
+    .expect("delete name_flags for file");
+    conn.execute(
+        "DELETE FROM clones WHERE symbol_a IN (SELECT id FROM symbols WHERE file_id = ?) \
+         OR symbol_b IN (SELECT id FROM symbols WHERE file_id = ?)",
+        params![fid, fid],
+    )
+    .expect("delete clones for file");
+    conn.execute(
+        "DELETE FROM issues WHERE file_id = ? OR symbol_id IN (SELECT id FROM symbols WHERE file_id = ?)",
+        params![fid, fid],
+    )
+    .expect("delete issues for file");
+    conn.execute("DELETE FROM call_facts WHERE src_file_id = ?", [fid])
+        .expect("delete call_facts for file");
+    conn.execute("DELETE FROM import_facts WHERE src_file_id = ?", [fid])
+        .expect("delete import_facts for file");
+    conn.execute(
+        "DELETE FROM edges WHERE src_file_id = ? OR dst_file_id = ?",
+        params![fid, fid],
+    )
+    .expect("delete edges for file");
+    conn.execute("DELETE FROM symbols WHERE file_id = ?", [fid])
+        .expect("delete symbols for file");
+    conn.execute("DELETE FROM files WHERE id = ?", [fid])
+        .expect("delete files row");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_repo() -> std::path::PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let repo = std::env::temp_dir().join(format!("dued-store-test-{nanos}"));
+        fs::create_dir_all(repo.join("dued")).unwrap();
+        repo
+    }
+
+    #[test]
+    fn delete_file_row_removes_files_and_issue_children() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) \
+             VALUES (1, 'a.py', 'python', 'd1', 10, 20, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, \
+             cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test) \
+             VALUES (10, 1, 'big', 'function', 1, 40, 'def big()', '', 'pass', 1, 20, 1, 0, 1, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (10, 1, 'god_function', 'x', 50.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO name_flags(symbol_id, kind, detail, score) VALUES (10, 'hollow', 'x', 1.0)",
+            [],
+        )
+        .unwrap();
+        delete_file_row(&conn, "a.py");
+        let files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE relpath = 'a.py'", [], |r| r.get(0))
+            .unwrap();
+        let issues: i64 = conn
+            .query_row("SELECT COUNT(*) FROM issues", [], |r| r.get(0))
+            .unwrap();
+        let symbols: i64 = conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(files, 0);
+        assert_eq!(issues, 0);
+        assert_eq!(symbols, 0);
+        // Same relpath can be inserted again after delete (UNIQUE must be free).
+        conn.execute(
+            "INSERT INTO files(relpath, language, digest, loc, size, is_test) \
+             VALUES ('a.py', 'python', 'd2', 11, 22, 0)",
+            [],
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(repo);
+    }
 }

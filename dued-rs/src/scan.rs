@@ -34,10 +34,11 @@ pub fn run_scan(
 ) -> Value {
     let started = Instant::now();
     stage("walk source files");
-    let files = walk_repo(repo, max_files);
+    let files = dedupe_by_relpath(walk_repo(repo, max_files));
     note(&format!("found {} source files", files.len()));
     let conn = connect(repo);
-    conn.execute_batch("BEGIN IMMEDIATE").ok();
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .expect("begin scan transaction");
     let mut old: HashMap<String, String> = HashMap::new();
     {
         let mut stmt = conn.prepare("SELECT relpath, digest FROM files").unwrap();
@@ -105,6 +106,9 @@ pub fn run_scan(
                     break;
                 }
             }
+            // Delete again immediately before INSERT. Covers leftover rows and
+            // any duplicate dirty relpath so UNIQUE files.relpath cannot fire.
+            delete_file_row(&conn, &src.relpath);
             let text = fs::read(&src.path).unwrap_or_default();
             let suffix = src
                 .path
@@ -123,7 +127,7 @@ pub fn run_scan(
                     src.tokens,
                     extracted.ast_nodes
                 ])
-                .unwrap();
+                .expect("insert dirty file row");
             let file_id = conn.last_insert_rowid();
             let mut calls_by_owner: HashMap<&str, Vec<&str>> = HashMap::new();
             for (owner, callee) in &extracted.calls {
@@ -208,8 +212,21 @@ pub fn run_scan(
     let inv = inventory(&conn, repo);
     set_meta(&conn, "repo", &json!(repo.display().to_string()));
     set_meta(&conn, "model", &json!(model_used));
-    conn.execute_batch("COMMIT").ok();
+    conn.execute_batch("COMMIT")
+        .expect("commit scan transaction");
     summary(&conn, parsed, reused, clones.len(), hollow.len(), mismatches.len(), issues.len(), git_info, inv, started, model_used)
+}
+
+/// Keep one entry per relpath (last wins). Duplicate walk hits would otherwise
+/// delete once then INSERT twice and panic on UNIQUE files.relpath.
+fn dedupe_by_relpath(files: Vec<crate::walk::SourceFile>) -> Vec<crate::walk::SourceFile> {
+    let mut by_rel: HashMap<String, crate::walk::SourceFile> = HashMap::new();
+    for src in files {
+        by_rel.insert(src.relpath.clone(), src);
+    }
+    let mut out: Vec<_> = by_rel.into_values().collect();
+    out.sort_by(|a, b| a.relpath.cmp(&b.relpath));
+    out
 }
 
 fn summary(
@@ -244,4 +261,149 @@ fn summary(
         "engine": "dued",
         "model": model_used,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::issues::list_issues;
+    use crate::store::connect;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_repo(label: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let repo = std::env::temp_dir().join(format!("dued-scan-{label}-{nanos}"));
+        fs::create_dir_all(&repo).unwrap();
+        repo
+    }
+
+    fn write_py(repo: &Path, rel: &str, body: &str) {
+        let path = repo.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, body).unwrap();
+    }
+
+    fn god_fn_source(tag: &str) -> String {
+        // Enough branches for god_function scoring on rescan.
+        let mut body = format!("def messy_{tag}(x):\n");
+        for i in 0..20 {
+            body.push_str(&format!("    if x == {i}:\n        return {i}\n"));
+        }
+        body.push_str("    return x\n");
+        body
+    }
+
+    #[test]
+    fn dedupe_by_relpath_keeps_last() {
+        let a = crate::walk::SourceFile {
+            path: Path::new("a.py").to_path_buf(),
+            relpath: "a.py".into(),
+            language: "python".into(),
+            size: 1,
+            digest: "first".into(),
+            is_test: false,
+            loc: 1,
+            tokens: 1,
+        };
+        let mut b = a.clone();
+        b.digest = "second".into();
+        let out = dedupe_by_relpath(vec![a, b]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].digest, "second");
+    }
+
+    #[test]
+    fn dirty_rescan_updates_in_place_without_unique_panic() {
+        let repo = temp_repo("dirty");
+        write_py(&repo, "core.py", &god_fn_source("v1"));
+        write_py(&repo, "ok.py", "def fine():\n    return 1\n");
+        let first = run_scan(&repo, None, None, false, false, "stub");
+        assert_eq!(first["parsed"], 2);
+        assert_eq!(first["reused"], 0);
+
+        write_py(&repo, "core.py", &god_fn_source("v2"));
+        // Leftover-row case: a stale files row must not block the dirty INSERT.
+        // delete_file_row before INSERT clears it (same path as a failed prior delete).
+        let conn = connect(&repo);
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE relpath = 'core.py'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        drop(conn);
+
+        let second = run_scan(&repo, None, None, true, false, "stub");
+        assert_eq!(second["parsed"], 1);
+        assert_eq!(second["reused"], 1);
+        assert_eq!(second["files"], 2);
+
+        let conn = connect(&repo);
+        let digest: String = conn
+            .query_row("SELECT digest FROM files WHERE relpath = 'core.py'", [], |r| r.get(0))
+            .unwrap();
+        assert!(!digest.is_empty());
+        let issues = list_issues(&conn, 40);
+        for row in &issues {
+            if row["kind"] == "god_function" {
+                assert!(row["relpath"].as_str().is_some(), "{row}");
+                assert!(row["name"].as_str().is_some(), "{row}");
+                assert!(!row["relpath"].as_str().unwrap().is_empty());
+                assert!(!row["name"].as_str().unwrap().is_empty());
+            }
+        }
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn dirty_rescan_with_git_and_preexisting_row_survives_unique() {
+        let repo = temp_repo("git-dirty");
+        write_py(&repo, "a.py", "def a():\n    return 1\n");
+        Command::new("git").args(["init"]).current_dir(&repo).status().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "test"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&repo).status().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+
+        let first = run_scan(&repo, None, None, true, false, "stub");
+        assert_eq!(first["parsed"], 1);
+
+        // Simulate a half-cleaned index: issues point at the file, row still present.
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) \
+             SELECT s.id, f.id, 'god_function', 'stale', 99.0 FROM symbols s JOIN files f ON f.id = s.file_id LIMIT 1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        write_py(&repo, "a.py", "def a():\n    return 2\n");
+        let second = run_scan(&repo, None, None, true, false, "stub");
+        assert_eq!(second["parsed"], 1);
+        assert_eq!(second["reused"], 0);
+
+        let conn = connect(&repo);
+        let issues = list_issues(&conn, 40);
+        for row in &issues {
+            assert!(row["relpath"].as_str().is_some() || row["kind"] != "god_function", "{row}");
+            if row["kind"] == "god_function" {
+                assert!(row["name"].as_str().is_some(), "{row}");
+            }
+        }
+        let _ = fs::remove_dir_all(repo);
+    }
 }
