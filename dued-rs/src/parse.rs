@@ -149,22 +149,65 @@ fn leading_comment(node: Node, source: &[u8]) -> String {
     String::new()
 }
 
+fn strip_turbofish(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(idx) = rest.find("::<") {
+        out.push_str(&rest[..idx]);
+        rest = &rest[idx + 3..];
+        let mut depth = 1usize;
+        let mut end = 0usize;
+        for (i, ch) in rest.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + ch.len_utf8();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = if end > 0 { &rest[end..] } else { "" };
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_code_ident(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('<') || name.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
 fn call_ident(node: Node, source: &[u8]) -> String {
     let fn_node = node.child_by_field_name("function").or_else(|| node.child(0));
     let Some(fn_node) = fn_node else {
         return String::new();
     };
-    text(source, fn_node)
-        .split('(')
-        .next()
-        .unwrap_or("")
+    let before_paren = text(source, fn_node).split('(').next().unwrap_or("").to_string();
+    let without_turbo = strip_turbofish(&before_paren);
+    let name = without_turbo
         .rsplit("::")
         .next()
         .unwrap_or("")
         .rsplit('.')
         .next()
         .unwrap_or("")
-        .to_string()
+        .trim();
+    if is_code_ident(name) {
+        name.to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn collect_calls(node: Node, source: &[u8], owner: &str, out: &mut Extracted) {
@@ -486,6 +529,46 @@ pub fn parse_source(language: &str, path_suffix: &str, source: &[u8]) -> Extract
 #[cfg(test)]
 mod rust_type_tests {
     use super::*;
+
+    #[test]
+    fn call_ident_rejects_string_chop_garbage() {
+        let src = br#"
+fn resolve_deploy_anchor_pop() {
+    let _ = "Need compute capacity (datacenter)".into();
+}
+"#;
+        let extracted = parse_source("rust", ".rs", src);
+        let callees: Vec<&str> = extracted
+            .calls
+            .iter()
+            .filter(|(owner, _)| owner == "resolve_deploy_anchor_pop")
+            .map(|(_, c)| c.as_str())
+            .collect();
+        assert!(
+            !callees.iter().any(|c| c.contains(char::is_whitespace) || c.starts_with('<')),
+            "garbage callees: {callees:?}"
+        );
+        assert!(!callees.iter().any(|c| c.starts_with("Need")), "{callees:?}");
+    }
+
+    #[test]
+    fn call_ident_turbofish_uses_function_name() {
+        let src = br#"
+fn caller() {
+    let _ = foo::<Row>(1);
+}
+fn foo<T>(_x: i32) {}
+"#;
+        let extracted = parse_source("rust", ".rs", src);
+        let callees: Vec<&str> = extracted
+            .calls
+            .iter()
+            .filter(|(owner, _)| owner == "caller")
+            .map(|(_, c)| c.as_str())
+            .collect();
+        assert!(callees.contains(&"foo"), "{callees:?}");
+        assert!(!callees.iter().any(|c| c.starts_with('<') || c.contains("Row")), "{callees:?}");
+    }
 
     #[test]
     fn extracts_rust_struct_and_impl_method() {

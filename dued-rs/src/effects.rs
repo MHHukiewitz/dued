@@ -7,11 +7,13 @@ fn effect_patterns() -> &'static [(&'static str, Regex)] {
     static PATS: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
     PATS.get_or_init(|| {
         [
-            ("filesystem", r"\b(open|read_file|write_file|Path\(|fs\.|fs::|std::fs|tokio::fs|File::)\b"),
+            // Bare English "open" is not filesystem; require open( / File:: / OpenOptions / fs paths.
+            ("filesystem", r"\b(open\(|read_file|write_file|Path\(|fs\.|fs::|std::fs|tokio::fs|File::|OpenOptions)\b"),
             ("network", r"\b(requests\.|httpx|fetch\(|axios|ureq|reqwest|hyper::|websocket)\b"),
             ("db", r"(?i)\b(execute\(|query\(|sqlite3|sqlalchemy|prisma|diesel|sqlx)\b"),
             ("process", r"\b(subprocess|os\.system|child_process|Command::|std::process)\b"),
-            ("global_mutate", r"\bglobal\b|static mut\b"),
+            // Python `global` statement only; comment text like "global customer" must not match.
+            ("global_mutate", r"(?m)^\s*global\b|static mut\b"),
             ("unsafe", r"\bunsafe\b|\beval\("),
             ("panic", r"\b(unwrap\(|expect\(|panic!|raise |throw )\b"),
         ]
@@ -47,6 +49,35 @@ mod tests {
         let body = "fn poke(p: *const u8) -> u8 { unsafe { *p } }";
         let tags = tag_effects(body);
         assert!(tags.iter().any(|t| t == "unsafe"), "{tags:?}");
+    }
+
+    #[test]
+    fn english_open_in_format_is_not_filesystem() {
+        let body = r#"fn dispatch_company_command(technology: &str) { format!("flipped {technology} open"); }"#;
+        let tags = tag_effects(body);
+        assert!(!tags.iter().any(|t| t == "filesystem"), "{tags:?}");
+    }
+
+    #[test]
+    fn file_open_and_open_options_are_filesystem() {
+        let file_open = "fn load() { let _ = std::fs::File::open(\"x\"); }";
+        let opts = "fn load() { let _ = std::fs::OpenOptions::new().read(true).open(\"x\"); }";
+        assert!(tag_effects(file_open).iter().any(|t| t == "filesystem"), "{:?}", tag_effects(file_open));
+        assert!(tag_effects(opts).iter().any(|t| t == "filesystem"), "{:?}", tag_effects(opts));
+    }
+
+    #[test]
+    fn comment_global_is_not_global_mutate() {
+        let body = "fn update_customer_growth() {\n    // Calculate global customer counts\n    let n = 1;\n}";
+        let tags = tag_effects(body);
+        assert!(!tags.iter().any(|t| t == "global_mutate"), "{tags:?}");
+    }
+
+    #[test]
+    fn python_global_statement_is_global_mutate() {
+        let body = "def f():\n    global x\n    x = 1\n";
+        let tags = tag_effects(body);
+        assert!(tags.iter().any(|t| t == "global_mutate"), "{tags:?}");
     }
 }
 
