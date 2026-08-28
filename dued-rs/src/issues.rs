@@ -92,9 +92,9 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         .unwrap()
         .flatten()
     {
-        // Docs, tests, and fixtures co-change with product code by design.
-        // Those pairs are not shotgun surgery.
-        if is_docs_tests_or_fixtures(&row.0) || is_docs_tests_or_fixtures(&row.1) {
+        // Docs, tests, fixtures, assets, cursor config, and markdown/json QA
+        // co-change with product code by design. Those pairs are not surgery.
+        if is_shotgun_noise_partner(&row.0) || is_shotgun_noise_partner(&row.1) {
             continue;
         }
         if far_apart(&row.0, &row.1) && row.3 >= 0.4 {
@@ -114,15 +114,36 @@ fn far_apart(a: &str, b: &str) -> bool {
     pa.is_some() && pb.is_some() && pa != pb
 }
 
-/// True when a coupling partner lives under docs/, tests/, or fixtures.
-fn is_docs_tests_or_fixtures(path: &str) -> bool {
-    Path::new(path).components().any(|c| {
+/// True when a coupling partner is docs/QA noise rather than production surgery.
+fn is_shotgun_noise_partner(path: &str) -> bool {
+    let path = Path::new(path);
+    if path.components().any(|c| {
         let part = c.as_os_str().to_string_lossy().to_lowercase();
         matches!(
             part.as_str(),
-            "docs" | "doc" | "tests" | "test" | "fixtures" | "fixture"
+            "docs"
+                | "doc"
+                | "tests"
+                | "test"
+                | "fixtures"
+                | "fixture"
+                | "assets"
+                | "asset"
+                | ".cursor"
+                | "locales"
+                | "locale"
         )
-    })
+    }) {
+        return true;
+    }
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+    {
+        Some(ext) if matches!(ext.as_str(), "md" | "markdown" | "json") => true,
+        _ => false,
+    }
 }
 
 fn add(
@@ -305,14 +326,16 @@ mod tests {
     }
 
     #[test]
-    fn shotgun_skips_docs_and_fixtures_keeps_production_pair() {
+    fn shotgun_skips_docs_qa_noise_keeps_production_rs_pair() {
         let repo = temp_repo();
         let conn = connect(&repo);
         for (id, path) in [
-            (1, "src/game/state.rs"),
-            (2, "src/meta/commands.rs"),
+            (1, "crates/mainnet_graph/src/lib.rs"),
+            (2, "src/game/graph_bridge.rs"),
             (3, "docs/design/flow.md"),
             (4, "tests/fixtures/scenarios/a.toml"),
+            (5, "assets/locales/en.json"),
+            (6, ".cursor/rules.md"),
         ] {
             conn.execute(
                 "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'rust', 'd', 10, 20, 0)",
@@ -320,20 +343,23 @@ mod tests {
             )
             .unwrap();
         }
-        // docs <-> src and fixtures <-> src must not become shotgun_surgery.
-        conn.execute(
-            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('docs/design/flow.md', 'src/game/state.rs', 5, 1.0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('src/game/state.rs', 'tests/fixtures/scenarios/a.toml', 5, 1.0)",
-            [],
-        )
-        .unwrap();
+        // docs/QA/assets/cursor noise must not become shotgun_surgery.
+        for (a, b) in [
+            ("docs/design/flow.md", "src/game/graph_bridge.rs"),
+            ("src/game/graph_bridge.rs", "tests/fixtures/scenarios/a.toml"),
+            ("assets/locales/en.json", "src/game/graph_bridge.rs"),
+            (".cursor/rules.md", "src/game/graph_bridge.rs"),
+            ("AGENTS.md", "src/game/graph_bridge.rs"),
+        ] {
+            conn.execute(
+                "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES (?1, ?2, 5, 1.0)",
+                params![a, b],
+            )
+            .unwrap();
+        }
         // Two far-apart production .rs files still can.
         conn.execute(
-            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('src/game/state.rs', 'src/meta/commands.rs', 4, 0.8)",
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('crates/mainnet_graph/src/lib.rs', 'src/game/graph_bridge.rs', 9, 0.9)",
             [],
         )
         .unwrap();
@@ -346,19 +372,30 @@ mod tests {
             .collect();
         assert_eq!(shotguns.len(), 1, "{shotguns:?}");
         assert!(
-            shotguns[0].contains("src/game/state.rs") && shotguns[0].contains("src/meta/commands.rs"),
+            shotguns[0].contains("crates/mainnet_graph/src/lib.rs")
+                && shotguns[0].contains("src/game/graph_bridge.rs"),
             "{shotguns:?}"
         );
-        assert!(!shotguns.iter().any(|d| d.contains("docs/") || d.contains("fixtures")), "{shotguns:?}");
+        assert!(
+            !shotguns
+                .iter()
+                .any(|d| d.contains("docs/") || d.contains("fixtures") || d.contains("assets/") || d.contains(".cursor")),
+            "{shotguns:?}"
+        );
         let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
-    fn is_docs_tests_or_fixtures_matches_path_segments() {
-        assert!(is_docs_tests_or_fixtures("docs/design/flow.md"));
-        assert!(is_docs_tests_or_fixtures("tests/fixtures/scenarios/a.toml"));
-        assert!(is_docs_tests_or_fixtures("src/tests/helper.rs"));
-        assert!(!is_docs_tests_or_fixtures("src/game/state.rs"));
-        assert!(!is_docs_tests_or_fixtures("src/meta/commands.rs"));
+    fn is_shotgun_noise_partner_matches_denylist() {
+        assert!(is_shotgun_noise_partner("docs/design/flow.md"));
+        assert!(is_shotgun_noise_partner("tests/fixtures/scenarios/a.toml"));
+        assert!(is_shotgun_noise_partner("src/tests/helper.rs"));
+        assert!(is_shotgun_noise_partner("assets/locales/en.json"));
+        assert!(is_shotgun_noise_partner(".cursor/rules.md"));
+        assert!(is_shotgun_noise_partner("AGENTS.md"));
+        assert!(is_shotgun_noise_partner("config/settings.json"));
+        assert!(!is_shotgun_noise_partner("crates/mainnet_graph/src/lib.rs"));
+        assert!(!is_shotgun_noise_partner("src/game/graph_bridge.rs"));
+        assert!(!is_shotgun_noise_partner("src/game/state.rs"));
     }
 }
