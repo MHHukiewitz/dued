@@ -35,15 +35,19 @@ def _seed_crowded_issues(repo: Path) -> None:
     for i in range(50):
         conn.execute(
             "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (?,?,?,?,?)",
-            (None, fid, "god_function", f"god {i}", 100.0 - i),
+            (None, fid, "god_function", f"god {i}", 10000.0 - i),
         )
     conn.execute(
         "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (?,?,?,?,?)",
-        (None, fid, "effect_in_core", "I/O mixed into core (fan_in=3)", 3.0),
+        (None, fid, "god_module", "god module symbols=20 cognitive=50", 50.0),
     )
     conn.execute(
         "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (?,?,?,?,?)",
-        (None, fid, "shotgun_surgery", "core/engine.py <-> ui/view.py shared=4", 0.5),
+        (None, fid, "effect_in_core", "I/O mixed into core (fan_in=3)", 20.0),
+    )
+    conn.execute(
+        "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (?,?,?,?,?)",
+        (None, fid, "shotgun_surgery", "core/engine.py <-> ui/view.py shared=4", 0.8),
     )
     conn.commit()
     conn.close()
@@ -71,11 +75,14 @@ def test_json_issues_includes_effect_and_shotgun(tmp_path: Path) -> None:
     rows = json.loads(result.stdout)
     kinds = {row["kind"] for row in rows}
     assert "god_function" in kinds, kinds
+    assert "god_module" in kinds, kinds
     assert "effect_in_core" in kinds, kinds
     assert "shotgun_surgery" in kinds, kinds
-    assert len(rows) <= 40
+    assert sum(1 for row in rows if row["kind"] == "god_function") == 40
+    assert sum(1 for row in rows if row["kind"] == "shotgun_surgery") == 1
 
     human = runner.invoke(app, ["--repo", str(repo), "--quiet", "issues"])
     assert human.exit_code == 0, human.output
     assert "effect_in_core" in human.stdout
     assert "shotgun_surgery" in human.stdout
+    assert "god_module" in human.stdout
