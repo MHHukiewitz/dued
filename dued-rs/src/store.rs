@@ -10,7 +10,7 @@ pub const SCHEMA_VERSION: i64 = 2;
 
 /// Bump when parse rules change what symbols a file yields for the same bytes.
 /// Scan treats a mismatch as all walked files dirty (digest match alone is not enough).
-pub const PARSER_VERSION: i64 = 1;
+pub const PARSER_VERSION: i64 = 2;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (

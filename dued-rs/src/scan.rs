@@ -377,6 +377,12 @@ impl TheStruct {
         Self { id }
     }
 }
+
+pub fn resolve_deploy_anchor_pop() {
+    let _ = "Need compute capacity (datacenter)".into();
+    let _ = foo::<Row>(1);
+}
+fn foo<T>(_x: i32) {}
 "#,
         )
         .unwrap();
@@ -394,10 +400,22 @@ impl TheStruct {
             )
             .unwrap();
         assert_eq!(kind, "struct");
-        // Simulate an index built before Rust type extraction existed.
+        // Simulate an index built before Rust type extraction / call_ident filters.
         conn.execute("DELETE FROM symbols WHERE kind = 'struct'", [])
             .unwrap();
-        set_meta(&conn, "parser_version", &Value::from(0i64));
+        let (owner_id, file_id): (i64, i64) = conn
+            .query_row(
+                "SELECT id, file_id FROM symbols WHERE name = 'resolve_deploy_anchor_pop'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO call_facts(src_file_id, src_symbol_id, callee) VALUES (?1, ?2, 'Need compute capacity '), (?1, ?2, '<Row>')",
+            rusqlite::params![file_id, owner_id],
+        )
+        .unwrap();
+        set_meta(&conn, "parser_version", &Value::from(PARSER_VERSION - 1));
         let missing: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM symbols WHERE name = 'TheStruct'",
@@ -406,6 +424,14 @@ impl TheStruct {
             )
             .unwrap();
         assert_eq!(missing, 0);
+        let garbage: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM call_facts WHERE callee IN ('Need compute capacity ', '<Row>')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(garbage, 2);
         drop(conn);
 
         let second = run_scan(&repo, None, None, false, false, "stub");
@@ -426,6 +452,24 @@ impl TheStruct {
         let sliced = crate::slice::slice_symbol(&conn, "TheStruct", 2);
         assert!(sliced.get("error").is_none(), "{sliced}");
         assert_eq!(sliced["symbols"][0]["name"], "TheStruct");
+        let garbage: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM call_facts WHERE callee IN ('Need compute capacity ', '<Row>')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(garbage, 0, "stale call_ident garbage must be cleared on parser bump");
+        let foo_calls: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM call_facts cf
+                 JOIN symbols s ON s.id = cf.src_symbol_id
+                 WHERE s.name = 'resolve_deploy_anchor_pop' AND cf.callee = 'foo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(foo_calls, 1);
         let _ = fs::remove_dir_all(repo);
     }
 
