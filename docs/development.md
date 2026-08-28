@@ -10,7 +10,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-This compiles `dued._native` from `dued-rs/Cargo.toml`.
+This compiles `dued._native` from `dued-rs/Cargo.toml` with `extension-module` only. Real Jina ONNX needs `--features jina` (see [embeddings.md](embeddings.md)).
 
 ## Test
 
