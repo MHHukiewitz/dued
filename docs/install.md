@@ -32,7 +32,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-`pip install` uses maturin. It builds `dued-rs/` with the `extension-module` feature.
+`pip install` uses maturin. It builds `dued-rs/` with the `extension-module` feature. That default path does not compile `ort`. Use stub embeddings or `--no-embed` unless you add the Cargo `jina` feature.
 
 ## Optional native binary
 

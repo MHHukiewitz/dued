@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub const DEFAULT_MODEL: &str = "jinaai/jina-embeddings-v2-base-code";
+#[cfg(feature = "jina")]
 const MAX_SEQ: usize = 1024;
 const BATCH: usize = 8;
 
@@ -57,11 +58,35 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-fn encode_texts(jina: &mut Option<JinaEmbedder>, texts: &[String]) -> Vec<Vec<f32>> {
-    if let Some(model) = jina.as_mut() {
-        return model.encode(texts);
+enum EmbedBackend {
+    Stub,
+    #[cfg(feature = "jina")]
+    Jina(JinaEmbedder),
+}
+
+impl EmbedBackend {
+    fn load(model_name: &str) -> Self {
+        if use_stub(model_name) {
+            return Self::Stub;
+        }
+        #[cfg(feature = "jina")]
+        {
+            return Self::Jina(JinaEmbedder::load(model_name));
+        }
+        #[cfg(not(feature = "jina"))]
+        panic!(
+            "real Jina embeddings need dued-rs built with --features jina; \
+             use --model stub, DUED_STUB_EMBED=1, or --no-embed"
+        );
     }
-    texts.iter().map(|t| stub_vector(t)).collect()
+
+    fn encode(&mut self, texts: &[String]) -> Vec<Vec<f32>> {
+        match self {
+            Self::Stub => texts.iter().map(|t| stub_vector(t)).collect(),
+            #[cfg(feature = "jina")]
+            Self::Jina(model) => model.encode(texts),
+        }
+    }
 }
 
 pub fn embed_symbols(conn: &Connection, model_name: &str, only_missing: bool) {
@@ -76,11 +101,7 @@ pub fn embed_symbols(conn: &Connection, model_name: &str, only_missing: bool) {
         .unwrap()
         .flatten()
         .collect();
-    let mut jina = if use_stub(model_name) {
-        None
-    } else {
-        Some(JinaEmbedder::load(model_name))
-    };
+    let mut backend = EmbedBackend::load(model_name);
     let total = rows.len();
     let mut bar = crate::progress::Bar::new("embed", total);
     for (i, chunk) in rows.chunks(BATCH).enumerate() {
@@ -104,9 +125,9 @@ pub fn embed_symbols(conn: &Connection, model_name: &str, only_missing: bool) {
             .iter()
             .map(|(_, _, _, _, body)| body.chars().take(8000).collect())
             .collect();
-        let vs = encode_texts(&mut jina, &sigs);
-        let vd = encode_texts(&mut jina, &docs);
-        let vb = encode_texts(&mut jina, &bodies);
+        let vs = backend.encode(&sigs);
+        let vd = backend.encode(&docs);
+        let vb = backend.encode(&bodies);
         for ((id, _, _, _, _), (s, d, b)) in chunk.iter().zip(vs.iter().zip(vd.iter()).zip(vb.iter()).map(|((s, d), b)| (s, d, b))) {
             conn.execute(
                 "UPDATE symbols SET embed_sig = ?, embed_doc = ?, embed_body = ? WHERE id = ?",
@@ -119,6 +140,7 @@ pub fn embed_symbols(conn: &Connection, model_name: &str, only_missing: bool) {
     bar.finish();
 }
 
+#[cfg(feature = "jina")]
 struct JinaEmbedder {
     session: ort::session::Session,
     tokenizer: tokenizers::Tokenizer,
@@ -126,6 +148,7 @@ struct JinaEmbedder {
     output_name: String,
 }
 
+#[cfg(feature = "jina")]
 impl JinaEmbedder {
     fn load(model_name: &str) -> Self {
         crate::progress::note(&format!("load Jina model {model_name}"));
@@ -222,6 +245,7 @@ impl JinaEmbedder {
     }
 }
 
+#[cfg(feature = "jina")]
 fn mean_pool(tokens: &[f32], mask: &[i64], seq: usize, dim: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; dim];
     let mut count = 0.0f32;
@@ -243,6 +267,7 @@ fn mean_pool(tokens: &[f32], mask: &[i64], seq: usize, dim: usize) -> Vec<f32> {
     normalize(&out)
 }
 
+#[cfg(feature = "jina")]
 fn normalize(v: &[f32]) -> Vec<f32> {
     let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if n == 0.0 {
