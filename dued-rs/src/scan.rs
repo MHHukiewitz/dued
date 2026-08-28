@@ -406,4 +406,141 @@ mod tests {
         }
         let _ = fs::remove_dir_all(repo);
     }
+
+    fn write_rs(repo: &Path, rel: &str, body: &str) {
+        let path = repo.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, body).unwrap();
+    }
+
+    fn pad_rust(base: &str, target_bytes: usize) -> String {
+        // Grow file bytes with comments, not thousands of same-stem fns.
+        // Many `pad_fn_*` names collapse into one names.rs stem bucket and O(n²).
+        let mut out = String::from(base);
+        let mut i = 0u32;
+        while out.len() < target_bytes {
+            out.push_str(&format!(
+                "// padding line {i} keep large Rust sources in the index under scan\n"
+            ));
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn large_rust_sources_enter_files_and_slice_resolves() {
+        crate::progress::set_quiet(true);
+        let repo = temp_repo("large-rust");
+        // A few large-bodied pub fns share a leading `pub` token (clone-bucket stress)
+        // without exploding analyze_names stem groups.
+        let mut access = String::from(
+            "pub struct WholesaleContract {\n    pub id: u64,\n    pub qty: i64,\n}\n\n\
+             impl WholesaleContract {\n    pub fn apply(&self) -> u64 { self.id }\n}\n\n\
+             pub fn apply_purchase_wholesale(c: &WholesaleContract) -> u64 {\n    c.apply()\n}\n\n\
+             pub fn new() -> i32 { 0 }\n\n",
+        );
+        for i in 0..40 {
+            let pad = "x".repeat(120);
+            access.push_str(&format!(
+                "pub fn access_rule_{i}(state: &mut i32) -> i32 {{\n    let mut acc = *state;\n    // {pad}\n    acc = acc.wrapping_add({i});\n    *state = acc;\n    acc\n}}\n"
+            ));
+        }
+        let access = pad_rust(&access, 130_805);
+        let mut state = String::from(
+            "pub struct GameState {\n    pub tick: u64,\n}\n\n\
+             impl GameState {\n    pub fn step(&mut self) { self.tick += 1; }\n}\n\n\
+             pub fn new() -> GameState { GameState { tick: 0 } }\n\n",
+        );
+        for i in 0..40 {
+            let pad = "y".repeat(120);
+            state.push_str(&format!(
+                "pub fn state_op_{i}(tick: &mut u64) {{\n    let mut acc = *tick;\n    // {pad}\n    acc = acc.wrapping_add({i});\n    *tick = acc;\n}}\n"
+            ));
+        }
+        let state = pad_rust(&state, 300_868);
+        write_rs(&repo, "src/game/access_network.rs", &access);
+        write_rs(&repo, "src/game/state.rs", &state);
+        assert!(repo.join("src/game/access_network.rs").metadata().unwrap().len() >= 130_000);
+        assert!(repo.join("src/game/state.rs").metadata().unwrap().len() >= 300_000);
+
+        Command::new("git").args(["init"]).current_dir(&repo).status().unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "test"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        Command::new("git").args(["add", "."]).current_dir(&repo).status().unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+
+        let started = Instant::now();
+        let summary = run_scan(&repo, None, None, true, false, "stub");
+        assert!(
+            started.elapsed().as_secs() < 60,
+            "scan --git hung or was too slow: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(summary["files"], 2);
+        assert!(summary["parsed"].as_i64().unwrap() >= 2);
+
+        let conn = connect(&repo);
+        let paths: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT relpath FROM files ORDER BY relpath")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        assert!(
+            paths.iter().any(|p| p.ends_with("access_network.rs")),
+            "{paths:?}"
+        );
+        assert!(paths.iter().any(|p| p.ends_with("state.rs")), "{paths:?}");
+        let max_size: i64 = conn
+            .query_row("SELECT MAX(size) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert!(max_size >= 300_000, "max size {max_size}");
+
+        let sliced = crate::slice::slice_symbol(&conn, "WholesaleContract", 4);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        assert_eq!(sliced["root"]["name"], "WholesaleContract");
+        assert!(
+            sliced["root"]["relpath"]
+                .as_str()
+                .unwrap()
+                .ends_with("access_network.rs"),
+            "{sliced}"
+        );
+        let names: Vec<&str> = sliced["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["name"].as_str())
+            .collect();
+        assert!(names.contains(&"WholesaleContract"), "{names:?}");
+        let blast = sliced["blast_radius"].as_u64().or_else(|| sliced["blast_radius"].as_i64().map(|n| n as u64)).unwrap();
+        assert!(blast < 10, "blast_radius exploded: {sliced}");
+        assert!(!names.iter().any(|n| n.starts_with("access_rule_")), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("state_op_")), "{names:?}");
+        assert!(!names.contains(&"new"), "{names:?}");
+
+        let ambiguous = crate::slice::slice_symbol(&conn, "new", 4);
+        assert_eq!(
+            ambiguous.get("error").and_then(|v| v.as_str()),
+            Some("ambiguous symbol name; qualify as path::name")
+        );
+        let _ = fs::remove_dir_all(repo);
+    }
 }

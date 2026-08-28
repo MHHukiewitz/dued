@@ -401,6 +401,64 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             body.contains("#[test]") || name.starts_with("test_"),
         );
         return;
+    } else if matches!(
+        node.kind(),
+        "struct_item" | "enum_item" | "type_item" | "trait_item" | "union_item"
+    ) {
+        // Types must enter `symbols` so `slice WholesaleContract` (and peers) resolve.
+        let name = node
+            .child_by_field_name("name")
+            .map(|n| text(source, n))
+            .unwrap_or_else(|| "anonymous".into());
+        let mut vis = false;
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "visibility_modifier" {
+                vis = true;
+            }
+        }
+        let kind = match node.kind() {
+            "struct_item" => "struct",
+            "enum_item" => "enum",
+            "type_item" => "type",
+            "trait_item" => "trait",
+            "union_item" => "union",
+            _ => "type",
+        };
+        let sig: String = text(source, node)
+            .split('{')
+            .next()
+            .unwrap_or("")
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(240)
+            .collect();
+        push_fn(
+            out,
+            source,
+            node,
+            name,
+            kind,
+            sig,
+            leading_comment(node, source),
+            0,
+            vis,
+            false,
+            false,
+        );
+        // Still walk children so methods inside impl are separate; struct fields are not.
+        // For type items, children are fields/variants — do not recurse into them as fns.
+        return;
+    } else if node.kind() == "impl_item" {
+        // Walk impl bodies for methods; the impl type name itself is not a symbol here.
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_rust(child, source, out);
+        }
+        return;
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -423,4 +481,54 @@ pub fn parse_source(language: &str, path_suffix: &str, source: &[u8]) -> Extract
         _ => walk_ts(root, source, &mut extracted),
     }
     extracted
+}
+
+#[cfg(test)]
+mod rust_type_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_rust_struct_and_impl_method() {
+        let src = br#"
+pub struct WholesaleContract {
+    pub id: u64,
+    pub qty: i64,
+}
+
+impl WholesaleContract {
+    pub fn apply(&self) -> u64 { self.id }
+}
+
+pub fn apply_purchase_wholesale(c: &WholesaleContract) -> u64 {
+    c.apply()
+}
+"#;
+        let extracted = parse_source("rust", ".rs", src);
+        let names: Vec<&str> = extracted.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"WholesaleContract"), "{names:?}");
+        assert!(names.contains(&"apply"), "{names:?}");
+        assert!(names.contains(&"apply_purchase_wholesale"), "{names:?}");
+        let kind = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "WholesaleContract")
+            .map(|s| s.kind.as_str());
+        assert_eq!(kind, Some("struct"));
+    }
+
+    #[test]
+    fn extracts_rust_enum_and_type_alias() {
+        let src = br#"
+pub enum AccessTier { Free, Paid }
+pub type WholesaleId = u64;
+"#;
+        let extracted = parse_source("rust", ".rs", src);
+        let by_name: std::collections::HashMap<&str, &str> = extracted
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .collect();
+        assert_eq!(by_name.get("AccessTier"), Some(&"enum"));
+        assert_eq!(by_name.get("WholesaleId"), Some(&"type"));
+    }
 }
