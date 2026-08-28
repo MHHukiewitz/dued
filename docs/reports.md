@@ -47,6 +47,6 @@ Schema highlights:
 - `files` — path, language, size, test flag, git and profile overlays
 - `symbols` — name, kind, span, metrics, effects, risks, embeddings
 - `edges` / `call_facts` / `import_facts` — graph inputs
-- `meta` — schema version and scan metadata
+- `meta` — schema version, parser version, and scan metadata
 
-Do not commit `dued/` unless you have a reason to share an index.
+When the stored parser version does not match the engine, the next scan re-parses every walked file even if digests match. You do not need `--force` or a deleted index after a parse-rule upgrade.
