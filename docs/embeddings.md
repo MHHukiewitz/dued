@@ -4,7 +4,17 @@
 
 Default model: `jinaai/jina-embeddings-v2-base-code`
 
-Runtime: ONNX Runtime (`ort`). The first run can download model files into the Hugging Face cache. Later runs reuse that cache.
+Runtime: ONNX Runtime (`ort`), behind the Cargo `jina` feature. Default `pip install -e .` and maturin `extension-module` builds omit `ort`. Stub vectors and `--no-embed` work without that feature.
+
+To compile real Jina support:
+
+```bash
+cargo build --manifest-path dued-rs/Cargo.toml --features jina
+```
+
+Or pass `jina` to maturin when you build the extension. The pinned `ort` version is `=2.0.0-rc.10` (compatible with rustc 1.85).
+
+The first run with `jina` can download model files into the Hugging Face cache. Later runs reuse that cache.
 
 ## When to skip
 
