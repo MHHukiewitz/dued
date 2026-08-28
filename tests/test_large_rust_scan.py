@@ -35,6 +35,10 @@ def _write_large_game(repo: Path) -> None:
         "impl WholesaleContract {\n"
         "    pub fn apply(&self) -> u64 { self.id }\n"
         "}\n\n"
+        "pub fn apply_purchase_wholesale(c: &WholesaleContract) -> u64 {\n"
+        "    c.apply()\n"
+        "}\n\n"
+        "pub fn new() -> i32 { 0 }\n\n"
     )
     for i in range(40):
         pad = "x" * 120
@@ -56,6 +60,7 @@ def _write_large_game(repo: Path) -> None:
         "impl GameState {\n"
         "    pub fn step(&mut self) { self.tick += 1; }\n"
         "}\n\n"
+        "pub fn new() -> GameState { GameState { tick: 0 } }\n\n"
     )
     for i in range(40):
         pad = "y" * 120
@@ -128,6 +133,16 @@ def test_large_rust_files_indexed_and_slice_resolves(tmp_path: Path) -> None:
 
     sliced = slice_symbol(conn, "WholesaleContract")
     assert "error" not in sliced, sliced
+    assert sliced.get("root", {}).get("name") == "WholesaleContract", sliced
+    assert sliced.get("root", {}).get("relpath", "").endswith("access_network.rs"), sliced
     names = {row["name"] for row in sliced["symbols"]}
     assert "WholesaleContract" in names
+    # Unique type name must not pull every access_rule_* / state_op_* / ambiguous new.
+    assert sliced["blast_radius"] < 10, sliced
+    assert not any(n.startswith("access_rule_") for n in names), names
+    assert not any(n.startswith("state_op_") for n in names), names
+    assert "new" not in names
+
+    ambiguous = slice_symbol(conn, "new")
+    assert ambiguous.get("error") == "ambiguous symbol name; qualify as path::name"
     conn.close()

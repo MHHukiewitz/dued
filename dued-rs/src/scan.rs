@@ -437,7 +437,9 @@ mod tests {
         // without exploding analyze_names stem groups.
         let mut access = String::from(
             "pub struct WholesaleContract {\n    pub id: u64,\n    pub qty: i64,\n}\n\n\
-             impl WholesaleContract {\n    pub fn apply(&self) -> u64 { self.id }\n}\n\n",
+             impl WholesaleContract {\n    pub fn apply(&self) -> u64 { self.id }\n}\n\n\
+             pub fn apply_purchase_wholesale(c: &WholesaleContract) -> u64 {\n    c.apply()\n}\n\n\
+             pub fn new() -> i32 { 0 }\n\n",
         );
         for i in 0..40 {
             let pad = "x".repeat(120);
@@ -448,7 +450,8 @@ mod tests {
         let access = pad_rust(&access, 130_805);
         let mut state = String::from(
             "pub struct GameState {\n    pub tick: u64,\n}\n\n\
-             impl GameState {\n    pub fn step(&mut self) { self.tick += 1; }\n}\n\n",
+             impl GameState {\n    pub fn step(&mut self) { self.tick += 1; }\n}\n\n\
+             pub fn new() -> GameState { GameState { tick: 0 } }\n\n",
         );
         for i in 0..40 {
             let pad = "y".repeat(120);
@@ -512,6 +515,14 @@ mod tests {
 
         let sliced = crate::slice::slice_symbol(&conn, "WholesaleContract", 4);
         assert!(sliced.get("error").is_none(), "{sliced}");
+        assert_eq!(sliced["root"]["name"], "WholesaleContract");
+        assert!(
+            sliced["root"]["relpath"]
+                .as_str()
+                .unwrap()
+                .ends_with("access_network.rs"),
+            "{sliced}"
+        );
         let names: Vec<&str> = sliced["symbols"]
             .as_array()
             .unwrap()
@@ -519,6 +530,17 @@ mod tests {
             .filter_map(|row| row["name"].as_str())
             .collect();
         assert!(names.contains(&"WholesaleContract"), "{names:?}");
+        let blast = sliced["blast_radius"].as_u64().or_else(|| sliced["blast_radius"].as_i64().map(|n| n as u64)).unwrap();
+        assert!(blast < 10, "blast_radius exploded: {sliced}");
+        assert!(!names.iter().any(|n| n.starts_with("access_rule_")), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("state_op_")), "{names:?}");
+        assert!(!names.contains(&"new"), "{names:?}");
+
+        let ambiguous = crate::slice::slice_symbol(&conn, "new", 4);
+        assert_eq!(
+            ambiguous.get("error").and_then(|v| v.as_str()),
+            Some("ambiguous symbol name; qualify as path::name")
+        );
         let _ = fs::remove_dir_all(repo);
     }
 }

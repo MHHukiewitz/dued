@@ -498,16 +498,37 @@ pub struct WholesaleContract {
 impl WholesaleContract {
     pub fn apply(&self) -> u64 { self.id }
 }
+
+pub fn apply_purchase_wholesale(c: &WholesaleContract) -> u64 {
+    c.apply()
+}
 "#;
         let extracted = parse_source("rust", ".rs", src);
         let names: Vec<&str> = extracted.symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"WholesaleContract"), "{names:?}");
         assert!(names.contains(&"apply"), "{names:?}");
+        assert!(names.contains(&"apply_purchase_wholesale"), "{names:?}");
         let kind = extracted
             .symbols
             .iter()
             .find(|s| s.name == "WholesaleContract")
             .map(|s| s.kind.as_str());
         assert_eq!(kind, Some("struct"));
+    }
+
+    #[test]
+    fn extracts_rust_enum_and_type_alias() {
+        let src = br#"
+pub enum AccessTier { Free, Paid }
+pub type WholesaleId = u64;
+"#;
+        let extracted = parse_source("rust", ".rs", src);
+        let by_name: std::collections::HashMap<&str, &str> = extracted
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind.as_str()))
+            .collect();
+        assert_eq!(by_name.get("AccessTier"), Some(&"enum"));
+        assert_eq!(by_name.get("WholesaleId"), Some(&"type"));
     }
 }
