@@ -8,6 +8,10 @@ use crate::paths::{db_path, index_dir};
 
 pub const SCHEMA_VERSION: i64 = 2;
 
+/// Bump when parse rules change what symbols a file yields for the same bytes.
+/// Scan treats a mismatch as all walked files dirty (digest match alone is not enough).
+pub const PARSER_VERSION: i64 = 1;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -162,6 +166,13 @@ pub fn set_meta(conn: &Connection, key: &str, value: &Value) {
         params![key, value.to_string()],
     )
     .ok();
+}
+
+pub fn meta_i64(conn: &Connection, key: &str) -> Option<i64> {
+    let raw: String = conn
+        .query_row("SELECT value FROM meta WHERE key = ?", [key], |r| r.get(0))
+        .ok()?;
+    serde_json::from_str::<i64>(&raw).ok()
 }
 
 pub fn delete_file_row(conn: &Connection, relpath: &str) {

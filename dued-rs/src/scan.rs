@@ -21,7 +21,7 @@ use crate::parse::parse_source;
 use crate::progress::{note, stage, Bar};
 use crate::rank::compute_rank;
 use crate::risks::apply_risks;
-use crate::store::{connect, delete_file_row, set_meta};
+use crate::store::{connect, delete_file_row, meta_i64, set_meta, PARSER_VERSION};
 use crate::walk::walk_repo;
 
 pub fn run_scan(
@@ -56,6 +56,10 @@ pub fn run_scan(
             delete_file_row(&conn, relpath);
         }
     }
+    // Missing or older parser_version means digests alone are not enough: new
+    // extract rules (e.g. Rust structs) must re-parse even when bytes match.
+    let stored_parser = meta_i64(&conn, "parser_version").unwrap_or(0);
+    let parser_stale = stored_parser != PARSER_VERSION;
     let mut reused = 0i64;
     let mut dirty = Vec::new();
     for src in &files {
@@ -64,7 +68,7 @@ pub fn run_scan(
                 break;
             }
         }
-        if old.get(&src.relpath) == Some(&src.digest) {
+        if !parser_stale && old.get(&src.relpath) == Some(&src.digest) {
             reused += 1;
             continue;
         }
@@ -212,6 +216,7 @@ pub fn run_scan(
     let inv = inventory(&conn, repo);
     set_meta(&conn, "repo", &json!(repo.display().to_string()));
     set_meta(&conn, "model", &json!(model_used));
+    set_meta(&conn, "parser_version", &Value::from(PARSER_VERSION));
     conn.execute_batch("COMMIT")
         .expect("commit scan transaction");
     summary(&conn, parsed, reused, clones.len(), hollow.len(), mismatches.len(), issues.len(), git_info, inv, started, model_used)
@@ -267,7 +272,7 @@ fn summary(
 mod tests {
     use super::*;
     use crate::issues::list_issues;
-    use crate::store::connect;
+    use crate::store::{connect, meta_i64, set_meta, PARSER_VERSION};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -353,6 +358,74 @@ mod tests {
                 assert!(!row["name"].as_str().unwrap().is_empty());
             }
         }
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn parser_version_bump_reparses_matching_digests_for_rust_types() {
+        let repo = temp_repo("parser-bump");
+        let path = repo.join("types.rs");
+        fs::write(
+            &path,
+            r#"
+pub struct TheStruct {
+    pub id: u64,
+}
+
+impl TheStruct {
+    pub fn new(id: u64) -> Self {
+        Self { id }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let first = run_scan(&repo, None, None, false, false, "stub");
+        assert_eq!(first["parsed"], 1);
+        assert_eq!(first["reused"], 0);
+
+        let conn = connect(&repo);
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM symbols WHERE name = 'TheStruct'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "struct");
+        // Simulate an index built before Rust type extraction existed.
+        conn.execute("DELETE FROM symbols WHERE kind = 'struct'", [])
+            .unwrap();
+        set_meta(&conn, "parser_version", &Value::from(0i64));
+        let missing: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE name = 'TheStruct'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(missing, 0);
+        drop(conn);
+
+        let second = run_scan(&repo, None, None, false, false, "stub");
+        assert_eq!(second["parsed"], 1, "{second}");
+        assert_eq!(second["reused"], 0, "{second}");
+
+        let conn = connect(&repo);
+        let stored = meta_i64(&conn, "parser_version");
+        assert_eq!(stored, Some(PARSER_VERSION));
+        let kind: String = conn
+            .query_row(
+                "SELECT kind FROM symbols WHERE name = 'TheStruct'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "struct");
+        let sliced = crate::slice::slice_symbol(&conn, "TheStruct", 2);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        assert_eq!(sliced["symbols"][0]["name"], "TheStruct");
         let _ = fs::remove_dir_all(repo);
     }
 

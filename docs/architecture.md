@@ -20,6 +20,7 @@ The Python package is what you install from PyPI. Each `dued.*` module calls the
 
 1. **Walk** — collect source files and skip vendor and build directories.
 2. **Parse** — tree-sitter extractors for Python, TypeScript / JavaScript, and Rust.
+   Unchanged digests are reused unless `meta.parser_version` is missing or older than the engine.
 3. **Metrics** — cyclomatic complexity, cognitive complexity, nesting, argument count.
 4. **Graph** — imports and calls. Generic names such as `new` and `clone` do not fan out.
 5. **Git** (optional) — churn, authors, bus factor, coupling.
