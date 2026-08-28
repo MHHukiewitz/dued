@@ -117,15 +117,30 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
     unresolved_callees.dedup();
     let root_name = root["name"].as_str().unwrap_or("");
     let root_file = root["file_id"].as_i64().unwrap_or(0);
-    let mut cstmt = conn
-        .prepare(
-            r#"
+    // Unique names: also keep callers whose call edge left dst_file_id NULL.
+    // Issue #1 tightened callers to `dst_file_id = root` only; that dropped real
+    // cross-file callers (e.g. Game `impl` → imported crate fn) when resolution
+    // stored NULL. Outgoing BFS above still skips NULL — do not undo #1 blast fix.
+    // Ambiguous / path-qualified roots stay file-exact so NULL edges do not attach
+    // to every overload.
+    let name_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM symbols WHERE name = ?", [root_name], |r| r.get(0))
+        .unwrap_or(0);
+    let caller_sql = if name_count == 1 {
+        r#"
+        SELECT s.name, f.relpath, s.start_line
+        FROM edges e JOIN symbols s ON s.id = e.src_symbol_id JOIN files f ON f.id = s.file_id
+        WHERE e.dst_name = ? AND e.kind = 'call'
+          AND (e.dst_file_id = ? OR e.dst_file_id IS NULL)
+        "#
+    } else {
+        r#"
         SELECT s.name, f.relpath, s.start_line
         FROM edges e JOIN symbols s ON s.id = e.src_symbol_id JOIN files f ON f.id = s.file_id
         WHERE e.dst_name = ? AND e.kind = 'call' AND e.dst_file_id = ?
-        "#,
-        )
-        .unwrap();
+        "#
+    };
+    let mut cstmt = conn.prepare(caller_sql).unwrap();
     let callers: Vec<Value> = cstmt
         .query_map(params![root_name, root_file], |r| {
             Ok(json!({"name": r.get::<_, String>(0)?, "relpath": r.get::<_, String>(1)?, "start_line": r.get::<_, i64>(2)?}))
@@ -473,6 +488,108 @@ mod tests {
         assert_eq!(sliced["blast_radius"], 1);
         let effects = sliced["effects"].as_array().unwrap();
         assert!(effects.is_empty(), "{effects:?}");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn unique_name_keeps_unresolved_cross_file_caller() {
+        // Models graph_bridge → allocate_customers when the call edge left dst_file_id NULL.
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'crates/mainnet_graph/src/prototype/allocate.rs', 'rust', 'a', 40, 100, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'src/game/graph_bridge.rs', 'rust', 'b', 80, 200, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (1, 1, 'allocate_customers', 'function', 1, 20, 'fn allocate_customers()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (2, 2, 'apply_competitive_alloc_jobs', 'function', 100, 120, 'fn apply_competitive_alloc_jobs()', '', 'allocate_customers()', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        // Unresolved unique-name edge (dst_file_id NULL) — must still surface as a caller.
+        conn.execute(
+            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (2, 2, NULL, 'allocate_customers', 'call')",
+            [],
+        )
+        .unwrap();
+
+        let sliced = slice_symbol(&conn, "allocate_customers", 4);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        let callers = sliced["callers"].as_array().unwrap();
+        let names: Vec<&str> = callers.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(
+            names.contains(&"apply_competitive_alloc_jobs"),
+            "unique-name NULL edge dropped impl caller: {callers:?}"
+        );
+        assert_eq!(callers[0]["relpath"], "src/game/graph_bridge.rs");
+        // Outgoing blast must stay tight (root file only; no NULL fan-out).
+        assert_eq!(sliced["blast_radius"], 1);
+        assert_eq!(sliced["files"].as_array().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn ambiguous_qualified_root_ignores_unresolved_callers() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'a.rs', 'rust', 'a', 10, 10, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'b.rs', 'rust', 'b', 10, 10, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (3, 'caller.rs', 'rust', 'c', 10, 10, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (1, 1, 'process', 'function', 1, 5, 'fn process()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (2, 2, 'process', 'function', 1, 5, 'fn process()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (3, 3, 'entry', 'function', 1, 5, 'fn entry()', '', 'process()', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (3, 3, NULL, 'process', 'call')",
+            [],
+        )
+        .unwrap();
+
+        let sliced = slice_symbol(&conn, "a.rs::process", 1);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        let callers = sliced["callers"].as_array().unwrap();
+        assert!(
+            callers.is_empty(),
+            "ambiguous NULL caller must not attach to a qualified overload: {callers:?}"
+        );
         let _ = fs::remove_dir_all(&repo);
     }
 }
