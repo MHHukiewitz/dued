@@ -149,6 +149,29 @@ fn leading_comment(node: Node, source: &[u8]) -> String {
     String::new()
 }
 
+/// Outer attrs sit as named siblings before the item in tree-sitter-rust (`#[test]` then `fn`).
+fn leading_attrs(node: Node, source: &[u8]) -> String {
+    let mut stack = Vec::new();
+    let mut prev = node.prev_named_sibling();
+    while let Some(p) = prev {
+        if p.kind() != "attribute_item" {
+            break;
+        }
+        stack.push(text(source, p));
+        prev = p.prev_named_sibling();
+    }
+    let mut attrs = String::new();
+    for a in stack.into_iter().rev() {
+        attrs.push_str(&a);
+        attrs.push(' ');
+    }
+    attrs
+}
+
+fn is_rust_test_attr(attrs: &str) -> bool {
+    attrs.contains("#[test]") || attrs.contains("::test]")
+}
+
 fn strip_turbofish(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -410,7 +433,7 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             .unwrap_or_else(|| "anonymous".into());
         let nargs = count_params_src(node.child_by_field_name("parameters"), source);
         let mut vis = false;
-        let mut attrs = String::new();
+        let mut attrs = leading_attrs(node, source);
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "visibility_modifier" {
@@ -429,7 +452,6 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             .chars()
             .take(240)
             .collect();
-        let body = text(source, node);
         push_fn(
             out,
             source,
@@ -441,7 +463,7 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             nargs,
             vis || name == "main",
             name == "main" || attrs.contains("main]"),
-            body.contains("#[test]") || name.starts_with("test_"),
+            is_rust_test_attr(&attrs) || name.starts_with("test_"),
         );
         return;
     } else if matches!(
@@ -613,5 +635,18 @@ pub type WholesaleId = u64;
             .collect();
         assert_eq!(by_name.get("AccessTier"), Some(&"enum"));
         assert_eq!(by_name.get("WholesaleId"), Some(&"type"));
+    }
+
+    #[test]
+    fn rust_test_attr_sets_is_test() {
+        let src = b"#[test]\nfn rings_one() {}\n\nfn not_a_test() {}\n";
+        let extracted = parse_source("rust", ".rs", src);
+        let by_name: std::collections::HashMap<&str, bool> = extracted
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.is_test))
+            .collect();
+        assert_eq!(by_name.get("rings_one"), Some(&true), "{by_name:?}");
+        assert_eq!(by_name.get("not_a_test"), Some(&false), "{by_name:?}");
     }
 }

@@ -28,6 +28,7 @@ const GENERIC_CALLEES: &[&str] = &[
     "index_mut",
     "push",
     "pop",
+    "with_capacity",
     "get",
     "get_mut",
     "set",
@@ -305,6 +306,13 @@ mod tests {
     fn multiple_same_file_overloads_stay_unresolved() {
         let targets = vec![(10, 1), (12, 1), (11, 2)];
         let chosen = choose_call_targets("new", &targets, 1, &langs());
+        assert!(chosen.is_empty());
+    }
+
+    #[test]
+    fn with_capacity_does_not_bind_cross_file() {
+        let targets = vec![(20, 2)];
+        let chosen = choose_call_targets("with_capacity", &targets, 1, &langs());
         assert!(chosen.is_empty());
     }
 

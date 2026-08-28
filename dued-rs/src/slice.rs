@@ -1,5 +1,4 @@
 use std::collections::{HashSet, VecDeque};
-use std::path::Path;
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -162,7 +161,7 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
         .collect();
     all_effects.sort();
     all_effects.dedup();
-    let tests = test_map(conn, root_name, root["relpath"].as_str().unwrap_or(""));
+    let tests = test_map(conn, root_name, root_file, include_null_callers);
     let body = root["body"].as_str().unwrap_or("");
     let taint = taint_lite(body, root["signature"].as_str().unwrap_or(""), &all_effects);
     let cost: i64 = nodes
@@ -240,34 +239,120 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
     .collect()
 }
 
-fn test_map(conn: &Connection, name: &str, relpath: &str) -> Vec<Value> {
-    let stem = Path::new(relpath)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let needle = name.to_lowercase();
-    let mut stmt = conn
-        .prepare(
-            r#"
+fn test_map(conn: &Connection, name: &str, root_file: i64, include_null_callers: bool) -> Vec<Value> {
+    // #[test] (and file-level test) callers of the root — not fuzzy name/path match.
+    let sql = if include_null_callers {
+        r#"
         SELECT s.name, f.relpath, s.start_line
-        FROM symbols s JOIN files f ON f.id = s.file_id
-        WHERE s.is_test = 1 OR f.is_test = 1
-        "#,
-        )
-        .unwrap();
-    let mut found = Vec::new();
-    for row in stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+        FROM edges e
+        JOIN symbols s ON s.id = e.src_symbol_id
+        JOIN files f ON f.id = s.file_id
+        WHERE e.dst_name = ? AND e.kind = 'call'
+          AND (e.dst_file_id = ? OR e.dst_file_id IS NULL)
+          AND (s.is_test = 1 OR f.is_test = 1)
+        "#
+    } else {
+        r#"
+        SELECT s.name, f.relpath, s.start_line
+        FROM edges e
+        JOIN symbols s ON s.id = e.src_symbol_id
+        JOIN files f ON f.id = s.file_id
+        WHERE e.dst_name = ? AND e.kind = 'call' AND e.dst_file_id = ?
+          AND (s.is_test = 1 OR f.is_test = 1)
+        "#
+    };
+    let mut stmt = conn.prepare(sql).unwrap();
+    let mut found: Vec<Value> = stmt
+        .query_map(params![name, root_file], |r| {
+            Ok(json!({"name": r.get::<_, String>(0)?, "relpath": r.get::<_, String>(1)?, "start_line": r.get::<_, i64>(2)?}))
+        })
         .unwrap()
         .flatten()
-    {
-        let blob = format!("{} {}", row.0, row.1).to_lowercase();
-        if blob.contains(&needle) || blob.contains(&stem) {
-            found.push(json!({"name": row.0, "relpath": row.1, "start_line": row.2}));
-        }
-    }
+        .collect();
     found.truncate(20);
     found
+}
+
+fn is_param_ident(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn param_names_from_signature(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, ch) in signature[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return Vec::new();
+    };
+    if close <= open + 1 {
+        return Vec::new();
+    }
+    let inner = &signature[open + 1..close];
+    let mut params = Vec::new();
+    let mut start = 0usize;
+    let mut depth_paren = 0i32;
+    let mut depth_angle = 0i32;
+    let mut depth_bracket = 0i32;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '(' => depth_paren += 1,
+            ')' => depth_paren -= 1,
+            '<' => depth_angle += 1,
+            '>' => depth_angle = depth_angle.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            ',' if depth_paren == 0 && depth_angle == 0 && depth_bracket == 0 => {
+                push_param_name(&mut params, &inner[start..i]);
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    push_param_name(&mut params, &inner[start..]);
+    params
+}
+
+fn push_param_name(params: &mut Vec<String>, part: &str) {
+    let token = part
+        .trim()
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .split('=')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let token = token
+        .rsplit(|c: char| c == ' ' || c == '.')
+        .next()
+        .unwrap_or(token)
+        .trim_start_matches('@');
+    if is_param_ident(token) && token != "self" && token != "cls" {
+        params.push(token.to_string());
+    }
 }
 
 fn taint_lite(body: &str, signature: &str, effects: &[String]) -> Value {
@@ -275,17 +360,7 @@ fn taint_lite(body: &str, signature: &str, effects: &[String]) -> Value {
         .into_iter()
         .filter(|s| effects.contains(s))
         .collect();
-    let mut params_list = Vec::new();
-    if let (Some(a), Some(b)) = (signature.find('('), signature.rfind(')')) {
-        if b > a {
-            for part in signature[a + 1..b].split(',') {
-                let token = part.trim().split(':').next().unwrap_or("").split('=').next().unwrap_or("").trim();
-                if !token.is_empty() && token != "self" && token != "cls" {
-                    params_list.push(token.to_string());
-                }
-            }
-        }
-    }
+    let params_list = param_names_from_signature(signature);
     let reaching: Vec<String> = params_list
         .iter()
         .filter(|p| body.contains(p.as_str()) && !sinks.is_empty())
@@ -593,6 +668,89 @@ mod tests {
             "qualified root must keep NULL-edge caller: {callers:?}"
         );
         assert_eq!(sliced["blast_radius"], 1);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn taint_params_skips_nested_generic_commas() {
+        let params = param_names_from_signature(
+            "fn fill_region_mesh(region_id: u32, rings: Vec<(f64, f64)>)",
+        );
+        assert_eq!(params, vec!["region_id".to_string(), "rings".to_string()]);
+        assert!(!params.iter().any(|p| p.contains("f64") || p.contains('>') || p.contains(')')));
+        let taint = taint_lite(
+            "fn fill_region_mesh(region_id: u32, rings: Vec<(f64, f64)>) { let _ = region_id; }",
+            "fn fill_region_mesh(region_id: u32, rings: Vec<(f64, f64)>)",
+            &[],
+        );
+        let got: Vec<&str> = taint["params"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(got, vec!["region_id", "rings"]);
+        assert!(!got.iter().any(|p| p.contains("f64")));
+    }
+
+    #[test]
+    fn slice_tests_lists_test_attr_callers() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'mesh.rs', 'rust', 'a', 40, 100, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (1, 1, 'fill_region_mesh', 'function', 1, 20, 'fn fill_region_mesh(region_id: u32, rings: Vec<(f64, f64)>)', '', 'fn fill_region_mesh(region_id: u32, rings: Vec<(f64, f64)>) { Vec::with_capacity(8); }', 1, 1, 0, 2, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        for (i, name) in ["rings_one", "rings_two", "rings_three", "rings_four"].iter().enumerate() {
+            let id = 10 + i as i64;
+            let line = 30 + i as i64;
+            conn.execute(
+                "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+                 VALUES (?1, 1, ?2, 'function', ?3, ?3, ?4, '', '', 1, 1, 0, 0, 1, 0, 1, '[]')",
+                params![id, name, line, format!("fn {name}()")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (1, ?1, 1, 'fill_region_mesh', 'call')",
+                params![id],
+            )
+            .unwrap();
+        }
+        // Non-test caller must not appear in tests.
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects)
+             VALUES (99, 1, 'helper', 'function', 90, 95, 'fn helper()', '', '', 1, 1, 0, 0, 1, 0, 0, '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO edges(src_file_id, src_symbol_id, dst_file_id, dst_name, kind) VALUES (1, 99, 1, 'fill_region_mesh', 'call')",
+            [],
+        )
+        .unwrap();
+
+        let sliced = slice_symbol(&conn, "fill_region_mesh", 4);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        let tests: Vec<&str> = sliced["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(tests.len(), 4, "{tests:?}");
+        for name in ["rings_one", "rings_two", "rings_three", "rings_four"] {
+            assert!(tests.contains(&name), "{tests:?}");
+        }
+        assert!(!tests.contains(&"helper"));
+        let taint_params: Vec<&str> = sliced["taint"]["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(taint_params, vec!["region_id", "rings"]);
         let _ = fs::remove_dir_all(&repo);
     }
 }
