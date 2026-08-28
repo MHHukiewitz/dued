@@ -92,6 +92,11 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         .unwrap()
         .flatten()
     {
+        // Docs, tests, and fixtures co-change with product code by design.
+        // Those pairs are not shotgun surgery.
+        if is_docs_tests_or_fixtures(&row.0) || is_docs_tests_or_fixtures(&row.1) {
+            continue;
+        }
         if far_apart(&row.0, &row.1) && row.3 >= 0.4 {
             let detail = format!("{} <-> {} shared={}", row.0, row.1, row.2);
             let fid: Option<i64> = conn
@@ -107,6 +112,17 @@ fn far_apart(a: &str, b: &str) -> bool {
     let pa = Path::new(a).components().next().map(|c| c.as_os_str().to_string_lossy().into_owned());
     let pb = Path::new(b).components().next().map(|c| c.as_os_str().to_string_lossy().into_owned());
     pa.is_some() && pb.is_some() && pa != pb
+}
+
+/// True when a coupling partner lives under docs/, tests/, or fixtures.
+fn is_docs_tests_or_fixtures(path: &str) -> bool {
+    Path::new(path).components().any(|c| {
+        let part = c.as_os_str().to_string_lossy().to_lowercase();
+        matches!(
+            part.as_str(),
+            "docs" | "doc" | "tests" | "test" | "fixtures" | "fixture"
+        )
+    })
 }
 
 fn add(
@@ -286,5 +302,63 @@ mod tests {
         assert!(kinds.contains("shotgun_surgery"));
         assert!(kinds.contains("god_module"));
         assert!(kinds.contains("god_function"));
+    }
+
+    #[test]
+    fn shotgun_skips_docs_and_fixtures_keeps_production_pair() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        for (id, path) in [
+            (1, "src/game/state.rs"),
+            (2, "src/meta/commands.rs"),
+            (3, "docs/design/flow.md"),
+            (4, "tests/fixtures/scenarios/a.toml"),
+        ] {
+            conn.execute(
+                "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'rust', 'd', 10, 20, 0)",
+                params![id, path],
+            )
+            .unwrap();
+        }
+        // docs <-> src and fixtures <-> src must not become shotgun_surgery.
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('docs/design/flow.md', 'src/game/state.rs', 5, 1.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('src/game/state.rs', 'tests/fixtures/scenarios/a.toml', 5, 1.0)",
+            [],
+        )
+        .unwrap();
+        // Two far-apart production .rs files still can.
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('src/game/state.rs', 'src/meta/commands.rs', 4, 0.8)",
+            [],
+        )
+        .unwrap();
+
+        let found = apply_issues(&conn);
+        let shotguns: Vec<&str> = found
+            .iter()
+            .filter(|r| r["kind"] == "shotgun_surgery")
+            .filter_map(|r| r["detail"].as_str())
+            .collect();
+        assert_eq!(shotguns.len(), 1, "{shotguns:?}");
+        assert!(
+            shotguns[0].contains("src/game/state.rs") && shotguns[0].contains("src/meta/commands.rs"),
+            "{shotguns:?}"
+        );
+        assert!(!shotguns.iter().any(|d| d.contains("docs/") || d.contains("fixtures")), "{shotguns:?}");
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn is_docs_tests_or_fixtures_matches_path_segments() {
+        assert!(is_docs_tests_or_fixtures("docs/design/flow.md"));
+        assert!(is_docs_tests_or_fixtures("tests/fixtures/scenarios/a.toml"));
+        assert!(is_docs_tests_or_fixtures("src/tests/helper.rs"));
+        assert!(!is_docs_tests_or_fixtures("src/game/state.rs"));
+        assert!(!is_docs_tests_or_fixtures("src/meta/commands.rs"));
     }
 }
