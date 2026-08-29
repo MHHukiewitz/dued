@@ -13,7 +13,7 @@ from dued.dead import dead_report
 from dued.display import banner, emit as emit_human, print_analyze, print_brief
 from dued.heatmap import write_heatmap
 from dued.issues import list_issues
-from dued.embed import DEFAULT_MODEL, export_label_csv, similar_to
+from dued.embed import DEFAULT_MODEL, export_label_csv, similar_lookup_error, similar_to
 from dued.git_hist import analyze_history, history_report
 from dued.names import analyze_names
 from dued.paths import db_path, ensure_report_dir
@@ -41,12 +41,25 @@ def _emit(data: object, as_json: bool) -> None:
     emit_human(data, as_json)
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
     quiet: bool = typer.Option(False, "--quiet", help="Hide progress bars."),
     as_json: bool = typer.Option(False, "--json", help="Write machine-readable JSON to stdout."),
     repo: Optional[Path] = typer.Option(None, "--repo", help="Repository root. Default: current directory."),
+    _version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Print the dued version.",
+    ),
 ) -> None:
     ctx.ensure_object(dict)
     ctx.obj["quiet"] = quiet or as_json
@@ -172,16 +185,29 @@ def cluster(
 ) -> None:
     """Token clones and optional similar-to query."""
     conn = connect(ctx.obj["repo"])
+    if similar:
+        err = similar_lookup_error(conn, similar)
+        if err:
+            conn.close()
+            _emit({"error": err, "clones": [], "clusters": [], "similar": []}, ctx.obj["json"])
+            raise typer.Exit(code=1)
+        with progress_session(ctx.obj["quiet"]) as ui:
+            task = ui.add("similar", 1)
+            near = similar_to(conn, similar)
+            conn.commit()
+            ui.advance(task)
+        conn.close()
+        _emit({"clones": [], "clusters": [], "similar": near}, ctx.obj["json"])
+        return
     with progress_session(ctx.obj["quiet"]) as ui:
         task = ui.add("cluster", 1)
         clones = find_clones(conn)
         clones.extend(find_embed_clones(conn))
         clusters = label_clusters(conn)
-        near = similar_to(conn, similar) if similar else []
         conn.commit()
         ui.advance(task)
     conn.close()
-    _emit({"clones": clones, "clusters": clusters, "similar": near}, ctx.obj["json"])
+    _emit({"clones": clones, "clusters": clusters, "similar": []}, ctx.obj["json"])
 
 
 @app.command()

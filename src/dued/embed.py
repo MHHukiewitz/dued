@@ -13,6 +13,7 @@ __all__ = [
     "embed_symbols",
     "export_label_csv",
     "mismatch_flags",
+    "similar_lookup_error",
     "similar_to",
     "use_stub",
 ]
@@ -35,6 +36,10 @@ def mismatch_flags(conn: object) -> list[dict[str, object]]:
 
 def similar_to(conn: object, query: str, limit: int = 10) -> list[dict[str, object]]:
     return loads(_native.similar_to(str(repo_of(conn)), query))[:limit]
+
+
+def similar_lookup_error(conn: object, query: str) -> str | None:
+    return _native.similar_lookup_error(str(repo_of(conn)), query)
 
 
 def export_label_csv(conn: object, dest: Path) -> int:

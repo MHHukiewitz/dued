@@ -17,6 +17,12 @@ def test_version() -> None:
     assert "0.1.0" in result.stdout
 
 
+def test_version_flag() -> None:
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert "0.1.0" in result.stdout
+
+
 def test_analyze_writes_reports(tmp_path: Path) -> None:
     os.environ["DUED_STUB_EMBED"] = "1"
     repo = tmp_path / "mini"

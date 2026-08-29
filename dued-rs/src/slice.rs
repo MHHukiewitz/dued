@@ -1,10 +1,10 @@
 use std::collections::{HashSet, VecDeque};
-use std::path::Path;
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use crate::effects::tag_effects;
+use crate::parse::is_code_ident;
 
 pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
     let matches = find_symbols(conn, query);
@@ -117,6 +117,8 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
     unresolved_callees.dedup();
     let root_name = root["name"].as_str().unwrap_or("");
     let root_file = root["file_id"].as_i64().unwrap_or(0);
+    let root_kind = root["kind"].as_str().unwrap_or("");
+    let root_id = root["id"].as_i64().unwrap_or(0);
     // Unique names (#7) and path-qualified roots (#24): also keep callers whose
     // call edge left dst_file_id NULL. Issue #1 tightened callers to
     // `dst_file_id = root` only; that dropped real cross-file callers when
@@ -126,6 +128,10 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
         .query_row("SELECT COUNT(*) FROM symbols WHERE name = ?", [root_name], |r| r.get(0))
         .unwrap_or(0);
     let include_null_callers = name_count == 1 || query.contains("::");
+    let mut type_use_callers = Vec::new();
+    if is_type_kind(root_kind) && include_null_callers {
+        type_use_callers = attach_type_use_sites(conn, root_id, root_name, &mut nodes, &mut seen);
+    }
     let caller_sql = if include_null_callers {
         r#"
         SELECT s.name, f.relpath, s.start_line
@@ -148,6 +154,8 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
         .unwrap()
         .flatten()
         .collect();
+    let mut callers = callers;
+    callers.extend(type_use_callers);
     let files: Vec<String> = {
         let mut v: Vec<String> = nodes.iter().filter_map(|n| n["relpath"].as_str().map(|s| s.to_string())).collect();
         v.sort();
@@ -162,7 +170,7 @@ pub fn slice_symbol(conn: &Connection, query: &str, depth: i64) -> Value {
         .collect();
     all_effects.sort();
     all_effects.dedup();
-    let tests = test_map(conn, root_name, root["relpath"].as_str().unwrap_or(""));
+    let tests = test_map(conn, root_name, root_file);
     let body = root["body"].as_str().unwrap_or("");
     let taint = taint_lite(body, root["signature"].as_str().unwrap_or(""), &all_effects);
     let cost: i64 = nodes
@@ -193,7 +201,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
         let mut stmt = conn
             .prepare(
                 r#"
-            SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath, s.start_line
+            SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath, s.start_line, s.kind
             FROM symbols s JOIN files f ON f.id = s.file_id
             WHERE f.relpath = ? AND s.name = ?
             "#,
@@ -209,6 +217,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
                     "file_id": r.get::<_, i64>(4)?,
                     "relpath": r.get::<_, String>(5)?,
                     "start_line": r.get::<_, i64>(6)?,
+                    "kind": r.get::<_, String>(7)?,
                 }))
             })
             .unwrap()
@@ -218,7 +227,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath, s.start_line
+        SELECT s.id, s.name, s.signature, s.body, s.file_id, f.relpath, s.start_line, s.kind
         FROM symbols s JOIN files f ON f.id = s.file_id
         WHERE s.name = ? ORDER BY f.relpath
         "#,
@@ -233,6 +242,7 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
             "file_id": r.get::<_, i64>(4)?,
             "relpath": r.get::<_, String>(5)?,
             "start_line": r.get::<_, i64>(6)?,
+            "kind": r.get::<_, String>(7)?,
         }))
     })
     .unwrap()
@@ -240,32 +250,27 @@ fn find_symbols(conn: &Connection, query: &str) -> Vec<Value> {
     .collect()
 }
 
-fn test_map(conn: &Connection, name: &str, relpath: &str) -> Vec<Value> {
-    let stem = Path::new(relpath)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let needle = name.to_lowercase();
+fn test_map(conn: &Connection, name: &str, root_file: i64) -> Vec<Value> {
     let mut stmt = conn
         .prepare(
             r#"
         SELECT s.name, f.relpath, s.start_line
-        FROM symbols s JOIN files f ON f.id = s.file_id
-        WHERE s.is_test = 1 OR f.is_test = 1
+        FROM edges e
+        JOIN symbols s ON s.id = e.src_symbol_id
+        JOIN files f ON f.id = s.file_id
+        WHERE e.dst_name = ? AND e.kind = 'call'
+          AND (e.dst_file_id = ? OR e.dst_file_id IS NULL)
+          AND s.is_test = 1
         "#,
         )
         .unwrap();
-    let mut found = Vec::new();
-    for row in stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+    let mut found: Vec<Value> = stmt
+        .query_map(params![name, root_file], |r| {
+            Ok(json!({"name": r.get::<_, String>(0)?, "relpath": r.get::<_, String>(1)?, "start_line": r.get::<_, i64>(2)?}))
+        })
         .unwrap()
         .flatten()
-    {
-        let blob = format!("{} {}", row.0, row.1).to_lowercase();
-        if blob.contains(&needle) || blob.contains(&stem) {
-            found.push(json!({"name": row.0, "relpath": row.1, "start_line": row.2}));
-        }
-    }
+        .collect();
     found.truncate(20);
     found
 }
@@ -280,7 +285,7 @@ fn taint_lite(body: &str, signature: &str, effects: &[String]) -> Value {
         if b > a {
             for part in signature[a + 1..b].split(',') {
                 let token = part.trim().split(':').next().unwrap_or("").split('=').next().unwrap_or("").trim();
-                if !token.is_empty() && token != "self" && token != "cls" {
+                if is_code_ident(token) && token != "self" && token != "cls" {
                     params_list.push(token.to_string());
                 }
             }
@@ -292,6 +297,93 @@ fn taint_lite(body: &str, signature: &str, effects: &[String]) -> Value {
         .cloned()
         .collect();
     json!({"sinks": sinks, "params": params_list, "params_may_reach_sinks": reaching})
+}
+
+fn is_type_kind(kind: &str) -> bool {
+    matches!(kind, "struct" | "enum" | "type" | "trait" | "union")
+}
+
+fn contains_ident(hay: &str, ident: &str) -> bool {
+    if ident.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(rel) = hay[start..].find(ident) {
+        let abs = start + rel;
+        let before_ok = abs == 0 || !is_ident_char(hay[..abs].chars().next_back().unwrap());
+        let after = abs + ident.len();
+        let after_ok = after >= hay.len() || !is_ident_char(hay[after..].chars().next().unwrap());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + ident.len();
+    }
+    false
+}
+
+fn is_ident_char(c: char) -> bool {
+    c == '_' || c.is_ascii_alphanumeric()
+}
+
+fn attach_type_use_sites(
+    conn: &Connection,
+    root_id: i64,
+    root_name: &str,
+    nodes: &mut Vec<Value>,
+    seen: &mut HashSet<i64>,
+) -> Vec<Value> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+        SELECT s.id, s.name, s.start_line, s.signature, s.effects, s.cognitive, s.body, s.file_id, f.relpath
+        FROM symbols s JOIN files f ON f.id = s.file_id
+        WHERE s.id != ?
+        "#,
+        )
+        .unwrap();
+    let rows: Vec<(i64, String, i64, String, String, i64, String, i64, String)> = stmt
+        .query_map([root_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })
+        .unwrap()
+        .flatten()
+        .collect();
+    let mut callers = Vec::new();
+    for row in rows {
+        if seen.contains(&row.0) {
+            continue;
+        }
+        if !contains_ident(&row.3, root_name) && !contains_ident(&row.6, root_name) {
+            continue;
+        }
+        seen.insert(row.0);
+        let effects: Value = serde_json::from_str(&row.4).unwrap_or(json!([]));
+        nodes.push(json!({
+            "id": row.0,
+            "name": row.1,
+            "relpath": row.8,
+            "start_line": row.2,
+            "signature": row.3,
+            "effects": effects,
+            "cognitive": row.5,
+            "depth": 1,
+        }));
+        callers.push(json!({"name": row.1, "relpath": row.8, "start_line": row.2}));
+        if callers.len() >= 40 {
+            break;
+        }
+    }
+    callers
 }
 
 #[cfg(test)]
@@ -593,6 +685,114 @@ mod tests {
             "qualified root must keep NULL-edge caller: {callers:?}"
         );
         assert_eq!(sliced["blast_radius"], 1);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn fill_region_mesh_keeps_with_capacity_unresolved_and_lists_tests() {
+        crate::progress::set_quiet(true);
+        let repo = temp_repo();
+        fs::write(
+            repo.join("mesh.rs"),
+            r#"
+pub fn fill_region_mesh(region_id: u32, rings: Vec<(f64, f64)>) {
+    let _v: Vec<u8> = Vec::with_capacity(8);
+    let _ = (region_id, rings);
+}
+#[test]
+fn empty_rings() { fill_region_mesh(1, vec![]); }
+#[test]
+fn one_ring() { fill_region_mesh(1, vec![(0.0, 0.0)]); }
+#[test]
+fn two_rings() { fill_region_mesh(1, vec![(0.0, 0.0), (1.0, 1.0)]); }
+#[test]
+fn bad_region() { fill_region_mesh(0, vec![]); }
+"#,
+        )
+        .unwrap();
+        fs::write(
+            repo.join("edge.rs"),
+            r#"
+pub struct EdgeAttrs;
+impl EdgeAttrs {
+    pub fn with_capacity(_n: usize) -> Self { Self }
+}
+"#,
+        )
+        .unwrap();
+        crate::scan::run_scan(&repo, None, None, false, false, "stub");
+        let conn = connect(&repo);
+        let sliced = slice_symbol(&conn, "fill_region_mesh", 4);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        let files: Vec<&str> = sliced["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(!files.iter().any(|f| f.ends_with("edge.rs")), "{files:?}");
+        let unresolved: Vec<&str> = sliced["unresolved_callees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(unresolved.contains(&"with_capacity"), "{unresolved:?}");
+        let tests: Vec<&str> = sliced["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for name in ["empty_rings", "one_ring", "two_rings", "bad_region"] {
+            assert!(tests.contains(&name), "{tests:?}");
+        }
+        let params: Vec<&str> = sliced["taint"]["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(params, vec!["region_id", "rings"], "{params:?}");
+        assert!(!params.iter().any(|p| p.contains(')') || p.contains(']') || p.contains('<')), "{params:?}");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn type_slice_lists_signature_use_sites() {
+        crate::progress::set_quiet(true);
+        let repo = temp_repo();
+        fs::write(
+            repo.join("state.rs"),
+            "pub struct GameState { pub tick: u64 }\n",
+        )
+        .unwrap();
+        fs::write(
+            repo.join("other.rs"),
+            "pub fn tick(s: &GameState) { let _ = s.tick; }\n",
+        )
+        .unwrap();
+        crate::scan::run_scan(&repo, None, None, false, false, "stub");
+        let conn = connect(&repo);
+        let sliced = slice_symbol(&conn, "GameState", 4);
+        assert!(sliced.get("error").is_none(), "{sliced}");
+        let names: Vec<&str> = sliced["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str())
+            .collect();
+        assert!(names.contains(&"GameState"), "{names:?}");
+        assert!(names.contains(&"tick"), "{names:?}");
+        let files: Vec<&str> = sliced["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(files.iter().any(|f| f.ends_with("other.rs")), "{files:?}");
+        let blast = sliced["blast_radius"].as_u64().or_else(|| sliced["blast_radius"].as_i64().map(|n| n as u64)).unwrap();
+        assert!(blast < 10, "{sliced}");
         let _ = fs::remove_dir_all(&repo);
     }
 }

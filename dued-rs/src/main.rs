@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use dued_rs::clones::{find_clones, find_embed_clones, label_clusters};
 use dued_rs::dead::dead_report;
 use dued_rs::display::{print_analyze, print_brief, print_value};
-use dued_rs::embed::{export_label_csv, similar_to, DEFAULT_MODEL};
+use dued_rs::embed::{export_label_csv, similar_lookup_error, similar_to, DEFAULT_MODEL};
 use dued_rs::git_hist::{analyze_history, history_report};
 use dued_rs::heatmap::write_heatmap;
 use dued_rs::issues::list_issues;
@@ -193,11 +193,19 @@ fn main() -> ExitCode {
         }
         Commands::Cluster { similar } => {
             let conn = connect(&repo);
-            let mut clones = find_clones(&conn);
-            clones.extend(find_embed_clones(&conn));
-            let clusters = label_clusters(&conn);
-            let near = similar.map(|q| similar_to(&conn, &q)).unwrap_or_default();
-            emit(&json!({"clones": clones, "clusters": clusters, "similar": near}), as_json);
+            if let Some(q) = similar {
+                if let Some(err) = similar_lookup_error(&conn, &q) {
+                    emit(&json!({"error": err, "clones": [], "clusters": [], "similar": []}), as_json);
+                    return ExitCode::FAILURE;
+                }
+                let near = similar_to(&conn, &q);
+                emit(&json!({"clones": [], "clusters": [], "similar": near}), as_json);
+            } else {
+                let mut clones = find_clones(&conn);
+                clones.extend(find_embed_clones(&conn));
+                let clusters = label_clusters(&conn);
+                emit(&json!({"clones": clones, "clusters": clusters, "similar": []}), as_json);
+            }
         }
         Commands::History => {
             let conn = connect(&repo);
