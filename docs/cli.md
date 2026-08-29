@@ -20,7 +20,7 @@ dued [GLOBAL] COMMAND
 
 ## `dued version`
 
-Print the package version.
+Print the package version. `dued --version` prints the same string.
 
 ## `dued analyze`
 
@@ -67,6 +67,12 @@ Show the behavior slice, effects, and blast radius.
 Pass a unique name. When the bare name matches more than one symbol, the command
 returns an ambiguity error with candidates. Qualify as `path::name`.
 
+`slice` resolves functions and type names (`struct`, `enum`, `type`, `trait`,
+`union`). It does not create symbols for enum variants or struct fields.
+
+A type slice lists other symbols whose signature or body names that type. Those
+use-sites do not expand through their own callees.
+
 Unresolved call edges (generic or ambiguous callees such as `new` / `get`) stay
 listed under `unresolved_callees`. They do not expand the blast radius.
 
@@ -92,7 +98,7 @@ Token clones and embed clusters.
 
 | Flag | Meaning |
 | --- | --- |
-| `--similar-to NAME` | Nearest neighbors for one symbol |
+| `--similar-to NAME` | Nearest neighbors for one symbol. Errors if the name is missing or has no embedding. Skips the token-clone dump. |
 
 ## `dued history`
 

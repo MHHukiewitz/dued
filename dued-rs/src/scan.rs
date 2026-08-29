@@ -138,7 +138,7 @@ pub fn run_scan(
                 calls_by_owner.entry(owner.as_str()).or_default().push(callee.as_str());
             }
             for symbol in &extracted.symbols {
-                let mut entry = symbol.is_entry || src.relpath.ends_with("main.py") || src.relpath.ends_with("main.rs");
+                let mut entry = symbol.is_entry;
                 if src.relpath.contains("app/") && src.relpath.ends_with("route.ts") && symbol.is_public {
                     entry = true;
                 }
@@ -658,6 +658,39 @@ fn foo<T>(_x: i32) {}
             ambiguous.get("error").and_then(|v| v.as_str()),
             Some("ambiguous symbol name; qualify as path::name")
         );
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn main_rs_helpers_are_not_entry() {
+        let repo = temp_repo("main-entry");
+        write_rs(
+            &repo,
+            "src/main.rs",
+            r#"
+fn helper() {}
+fn main() {
+    helper();
+}
+"#,
+        );
+        run_scan(&repo, None, None, false, false, "stub");
+        let conn = connect(&repo);
+        let rows: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT s.name, s.is_entry FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.relpath LIKE '%main.rs'",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+        let main_entry = rows.iter().find(|(n, _)| n == "main").map(|(_, e)| *e);
+        let helper_entry = rows.iter().find(|(n, _)| n == "helper").map(|(_, e)| *e);
+        assert_eq!(main_entry, Some(1), "{rows:?}");
+        assert_eq!(helper_entry, Some(0), "{rows:?}");
         let _ = fs::remove_dir_all(repo);
     }
 }

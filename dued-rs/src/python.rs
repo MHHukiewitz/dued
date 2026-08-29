@@ -211,6 +211,11 @@ fn similar_to(repo: &str, query: &str) -> String {
 }
 
 #[pyfunction]
+fn similar_lookup_error(repo: &str, query: &str) -> Option<String> {
+    with_conn(repo, |conn| crate::embed::similar_lookup_error(conn, query))
+}
+
+#[pyfunction]
 fn export_label_csv(repo: &str, dest: &str) -> usize {
     with_conn(repo, |conn| crate::embed::export_label_csv(conn, Path::new(dest)))
 }
@@ -405,6 +410,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(embed_symbols, m)?)?;
     m.add_function(wrap_pyfunction!(mismatch_flags, m)?)?;
     m.add_function(wrap_pyfunction!(similar_to, m)?)?;
+    m.add_function(wrap_pyfunction!(similar_lookup_error, m)?)?;
     m.add_function(wrap_pyfunction!(export_label_csv, m)?)?;
     m.add_function(wrap_pyfunction!(use_stub, m)?)?;
     m.add_function(wrap_pyfunction!(compute_rank, m)?)?;

@@ -137,6 +137,32 @@ fn python_import_names(node: Node, source: &[u8]) -> Vec<String> {
     names
 }
 
+fn leading_attrs(node: Node, source: &[u8]) -> String {
+    let mut parts = Vec::new();
+    let mut prev = node.prev_named_sibling();
+    while let Some(p) = prev {
+        if p.kind() == "attribute_item" {
+            parts.push(text(source, p));
+            prev = p.prev_named_sibling();
+        } else {
+            break;
+        }
+    }
+    parts.reverse();
+    let mut attrs = parts.join(" ");
+    if !attrs.is_empty() {
+        attrs.push(' ');
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "attribute_item" {
+            attrs.push_str(&text(source, child));
+            attrs.push(' ');
+        }
+    }
+    attrs
+}
+
 fn leading_comment(node: Node, source: &[u8]) -> String {
     if let Some(prev) = node.prev_named_sibling() {
         if matches!(prev.kind(), "comment" | "line_comment" | "block_comment") {
@@ -176,7 +202,7 @@ fn strip_turbofish(s: &str) -> String {
     out
 }
 
-fn is_code_ident(name: &str) -> bool {
+pub(crate) fn is_code_ident(name: &str) -> bool {
     if name.is_empty() || name.starts_with('<') || name.chars().any(char::is_whitespace) {
         return false;
     }
@@ -410,17 +436,13 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             .unwrap_or_else(|| "anonymous".into());
         let nargs = count_params_src(node.child_by_field_name("parameters"), source);
         let mut vis = false;
-        let mut attrs = String::new();
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "visibility_modifier" {
                 vis = true;
             }
-            if child.kind() == "attribute_item" {
-                attrs.push_str(&text(source, child));
-                attrs.push(' ');
-            }
         }
+        let attrs = leading_attrs(node, source);
         let sig: String = text(source, node)
             .split('{')
             .next()
@@ -430,6 +452,7 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             .take(240)
             .collect();
         let body = text(source, node);
+        let is_test = attrs.contains("test]") || body.contains("#[test]") || name.starts_with("test_");
         push_fn(
             out,
             source,
@@ -441,7 +464,7 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             nargs,
             vis || name == "main",
             name == "main" || attrs.contains("main]"),
-            body.contains("#[test]") || name.starts_with("test_"),
+            is_test,
         );
         return;
     } else if matches!(
@@ -613,5 +636,29 @@ pub type WholesaleId = u64;
             .collect();
         assert_eq!(by_name.get("AccessTier"), Some(&"enum"));
         assert_eq!(by_name.get("WholesaleId"), Some(&"type"));
+    }
+
+    #[test]
+    fn rust_test_attribute_sets_is_test() {
+        let src = br#"
+pub fn fill_region_mesh(region_id: u32, rings: Vec<(f64, f64)>) {}
+#[test]
+fn empty_rings() {
+    fill_region_mesh(1, vec![]);
+}
+"#;
+        let extracted = parse_source("rust", ".rs", src);
+        let empty = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "empty_rings")
+            .unwrap();
+        assert!(empty.is_test, "{empty:?}");
+        let root = extracted
+            .symbols
+            .iter()
+            .find(|s| s.name == "fill_region_mesh")
+            .unwrap();
+        assert!(!root.is_test, "{root:?}");
     }
 }

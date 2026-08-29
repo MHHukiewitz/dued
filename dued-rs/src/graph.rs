@@ -28,6 +28,14 @@ const GENERIC_CALLEES: &[&str] = &[
     "index_mut",
     "push",
     "pop",
+    "with_capacity",
+    "reserve",
+    "clear",
+    "extend",
+    "retain",
+    "capacity",
+    "truncate",
+    "resize",
     "get",
     "get_mut",
     "set",
@@ -313,6 +321,13 @@ mod tests {
         let targets = vec![(20, 2)];
         let chosen = choose_call_targets("get_user", &targets, 1, &langs());
         assert_eq!(chosen, vec![(20, 2)]);
+    }
+
+    #[test]
+    fn with_capacity_does_not_fan_out_across_files() {
+        let targets = vec![(20, 2)];
+        let chosen = choose_call_targets("with_capacity", &targets, 1, &langs());
+        assert!(chosen.is_empty());
     }
 
     #[test]

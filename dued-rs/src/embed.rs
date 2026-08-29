@@ -347,6 +347,32 @@ fn quantile(sorted: &[f64], q: f64) -> f64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
+pub fn similar_lookup_error(conn: &Connection, query: &str) -> Option<String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+        SELECT s.name, f.relpath, s.embed_body
+        FROM symbols s JOIN files f ON f.id = s.file_id
+        "#,
+        )
+        .unwrap();
+    let rows: Vec<(String, String, Option<Vec<u8>>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .flatten()
+        .collect();
+    let target = if let Some((path, name)) = query.rsplit_once("::") {
+        rows.iter().find(|r| r.1 == path && r.0 == name)
+    } else {
+        rows.iter().find(|r| r.0 == query)
+    };
+    match target {
+        None => Some("symbol not found".to_string()),
+        Some((_, _, None)) => Some("symbol has no embedding; scan without --no-embed".to_string()),
+        Some((_, _, Some(_))) => None,
+    }
+}
+
 pub fn similar_to(conn: &Connection, query: &str) -> Vec<Value> {
     let mut stmt = conn
         .prepare(
