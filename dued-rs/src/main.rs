@@ -77,7 +77,18 @@ enum Commands {
     /// List unused symbols, isolated files, and hollow stubs.
     Dead,
     /// List god functions, I/O in core, and shotgun-surgery flags.
-    Issues,
+    ///
+    /// Limit is applied per kind (not globally), so minority kinds stay visible.
+    Issues {
+        #[arg(
+            long,
+            default_value_t = 40,
+            help = "Max issues per kind (default 40). Ignored when --all is set"
+        )]
+        limit: i64,
+        #[arg(long, help = "Return every issue row; ignore --limit")]
+        all: bool,
+    },
     /// Report symbol name-health flags.
     Names,
     /// Token clones and optional similar-to query.
@@ -183,9 +194,10 @@ fn main() -> ExitCode {
             let conn = connect(&repo);
             emit(&dead_report(&conn), as_json);
         }
-        Commands::Issues => {
+        Commands::Issues { limit, all } => {
             let conn = connect(&repo);
-            emit(&Value::Array(list_issues(&conn, 40)), as_json);
+            let per_kind = if all { -1 } else { limit };
+            emit(&Value::Array(list_issues(&conn, per_kind)), as_json);
         }
         Commands::Names => {
             let conn = connect(&repo);

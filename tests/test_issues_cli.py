@@ -86,3 +86,36 @@ def test_json_issues_includes_effect_and_shotgun(tmp_path: Path) -> None:
     assert "effect_in_core" in human.stdout
     assert "shotgun_surgery" in human.stdout
     assert "god_module" in human.stdout
+
+
+def test_json_issues_limit_and_all(tmp_path: Path) -> None:
+    os.environ["DUED_STUB_EMBED"] = "1"
+    repo = tmp_path / "issues_limit"
+    repo.mkdir()
+    _copy_fixture(repo)
+
+    analyze = runner.invoke(
+        app,
+        ["--repo", str(repo), "--quiet", "--json", "analyze", "--no-embed", "--no-git"],
+    )
+    assert analyze.exit_code == 0, analyze.output
+    _seed_crowded_issues(repo)
+
+    limited = runner.invoke(
+        app, ["--repo", str(repo), "--quiet", "--json", "issues", "--limit", "5"]
+    )
+    assert limited.exit_code == 0, limited.output
+    rows = json.loads(limited.stdout)
+    assert sum(1 for row in rows if row["kind"] == "god_function") == 5
+    assert sum(1 for row in rows if row["kind"] == "shotgun_surgery") == 1
+
+    full = runner.invoke(app, ["--repo", str(repo), "--quiet", "--json", "issues", "--all"])
+    assert full.exit_code == 0, full.output
+    all_rows = json.loads(full.stdout)
+    assert sum(1 for row in all_rows if row["kind"] == "god_function") == 50
+    assert len(all_rows) == 53
+
+    help_out = runner.invoke(app, ["issues", "--help"])
+    assert help_out.exit_code == 0, help_out.output
+    assert "--limit" in help_out.stdout
+    assert "--all" in help_out.stdout

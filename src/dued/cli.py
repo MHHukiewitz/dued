@@ -154,12 +154,28 @@ def dead(ctx: typer.Context) -> None:
 
 
 @app.command()
-def issues(ctx: typer.Context) -> None:
-    """List god functions, effect-in-core, and shotgun-surgery flags."""
+def issues(
+    ctx: typer.Context,
+    limit: int = typer.Option(
+        40,
+        "--limit",
+        help="Max issues per kind (default 40). Ignored when --all is set.",
+    ),
+    all_issues: bool = typer.Option(
+        False,
+        "--all",
+        help="Return every issue row; ignore --limit.",
+    ),
+) -> None:
+    """List god functions, effect-in-core, and shotgun-surgery flags.
+
+    Limit is applied per kind (not globally), so minority kinds stay visible.
+    """
     conn = connect(ctx.obj["repo"])
     with progress_session(ctx.obj["quiet"]) as ui:
         task = ui.add("issues", 1)
-        data = list_issues(conn)
+        per_kind = -1 if all_issues else limit
+        data = list_issues(conn, limit=per_kind)
         ui.advance(task)
     conn.close()
     _emit(data, ctx.obj["json"])
