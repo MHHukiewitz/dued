@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -115,7 +116,13 @@ def test_json_issues_limit_and_all(tmp_path: Path) -> None:
     assert sum(1 for row in all_rows if row["kind"] == "god_function") == 50
     assert len(all_rows) == 53
 
-    help_out = runner.invoke(app, ["issues", "--help"])
+    # Rich may wrap option names with ANSI; strip before matching.
+    help_out = runner.invoke(
+        app,
+        ["issues", "--help"],
+        env={**os.environ, "NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "120"},
+    )
     assert help_out.exit_code == 0, help_out.output
-    assert "--limit" in help_out.stdout
-    assert "--all" in help_out.stdout
+    help_text = re.sub(r"\x1b\[[0-9;]*m", "", help_out.stdout)
+    assert "--limit" in help_text
+    assert "--all" in help_text
