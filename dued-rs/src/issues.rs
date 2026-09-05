@@ -51,7 +51,13 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
             .map(|s| s.as_str())
             .filter(|t| matches!(*t, "filesystem" | "network" | "db" | "process"))
             .collect();
-        if !io.is_empty() && row.4 >= 2 && !BOUNDARY.iter().any(|m| row.9.contains(m)) {
+        // Core = game/sim/domain (and other non-boundary product code).
+        // UI, scripts, and tools do I/O by design; they are not core.
+        if !io.is_empty()
+            && row.4 >= 2
+            && !is_effect_boundary_path(&row.9)
+            && !is_effect_non_core_path(&row.9)
+        {
             let detail = format!("I/O {io:?} mixed into core (fan_in={})", row.4);
             add(
                 conn,
@@ -112,6 +118,19 @@ fn far_apart(a: &str, b: &str) -> bool {
     let pa = Path::new(a).components().next().map(|c| c.as_os_str().to_string_lossy().into_owned());
     let pb = Path::new(b).components().next().map(|c| c.as_os_str().to_string_lossy().into_owned());
     pa.is_some() && pb.is_some() && pa != pb
+}
+
+/// True when the path is an expected I/O boundary (CLI, store, HTTP, etc.).
+fn is_effect_boundary_path(path: &str) -> bool {
+    BOUNDARY.iter().any(|m| path.contains(m))
+}
+
+/// True when the path is presentation or tooling, not game/sim/domain core.
+fn is_effect_non_core_path(path: &str) -> bool {
+    Path::new(path).components().any(|c| {
+        let part = c.as_os_str().to_string_lossy().to_lowercase();
+        matches!(part.as_str(), "ui" | "scripts" | "tools")
+    })
 }
 
 /// True when a coupling partner is docs/QA noise rather than production surgery.
@@ -418,5 +437,88 @@ mod tests {
         assert!(!is_shotgun_noise_partner("crates/mainnet_graph/src/lib.rs"));
         assert!(!is_shotgun_noise_partner("src/game/graph_bridge.rs"));
         assert!(!is_shotgun_noise_partner("src/game/state.rs"));
+    }
+
+    #[test]
+    fn is_effect_non_core_path_matches_ui_scripts_tools() {
+        assert!(is_effect_non_core_path("src/ui/renderer.rs"));
+        assert!(is_effect_non_core_path("src/ui/mod.rs"));
+        assert!(is_effect_non_core_path("scripts/bench.py"));
+        assert!(is_effect_non_core_path("tools/codegen.rs"));
+        assert!(is_effect_non_core_path("UI/View.swift"));
+        assert!(!is_effect_non_core_path("src/game/state.rs"));
+        assert!(!is_effect_non_core_path("src/sim/step.rs"));
+        assert!(!is_effect_non_core_path("src/domain/model.rs"));
+        assert!(!is_effect_non_core_path("core/engine.py"));
+        assert!(!is_effect_non_core_path("crates/mainnet_graph/src/lib.rs"));
+        // Substring alone is not enough: path segment must be ui/scripts/tools.
+        assert!(!is_effect_non_core_path("src/circuit/guide.rs"));
+        assert!(!is_effect_non_core_path("src/toolsmith/mod.rs"));
+    }
+
+    #[test]
+    fn effect_in_core_skips_ui_scripts_tools_keeps_domain() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        let effects = r#"["filesystem"]"#;
+        for (id, path) in [
+            (1, "src/game/persist.rs"),
+            (2, "src/sim/io_bridge.rs"),
+            (3, "src/domain/store_wrap.rs"),
+            (4, "src/ui/save_dialog.rs"),
+            (5, "scripts/export_state.py"),
+            (6, "tools/dump_db.rs"),
+            (7, "core/engine.py"),
+            (8, "src/cli.py"),
+        ] {
+            conn.execute(
+                "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'rust', 'd', 40, 80, 0)",
+                params![id, path],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+                 VALUES (?1, ?1, 'load', 'function', 1, 20, 'fn load()', '', 'open(path)', 1, 1, 1, 1, 1, 0, 0, ?2, 3, 0)",
+                params![id, effects],
+            )
+            .unwrap();
+        }
+
+        let found = apply_issues(&conn);
+        let effect_paths: Vec<&str> = found
+            .iter()
+            .filter(|r| r["kind"] == "effect_in_core")
+            .filter_map(|r| r["relpath"].as_str())
+            .collect();
+        assert!(
+            effect_paths.contains(&"src/game/persist.rs"),
+            "{effect_paths:?}"
+        );
+        assert!(
+            effect_paths.contains(&"src/sim/io_bridge.rs"),
+            "{effect_paths:?}"
+        );
+        assert!(
+            effect_paths.contains(&"src/domain/store_wrap.rs"),
+            "{effect_paths:?}"
+        );
+        assert!(
+            effect_paths.contains(&"core/engine.py"),
+            "{effect_paths:?}"
+        );
+        assert!(
+            !effect_paths.iter().any(|p| p.contains("/ui/") || *p == "src/ui/save_dialog.rs"),
+            "{effect_paths:?}"
+        );
+        assert!(
+            !effect_paths.iter().any(|p| p.starts_with("scripts/") || p.starts_with("tools/")),
+            "{effect_paths:?}"
+        );
+        // Existing BOUNDARY substrings still suppress the flag.
+        assert!(
+            !effect_paths.iter().any(|p| p.ends_with("cli.py")),
+            "{effect_paths:?}"
+        );
+        let _ = fs::remove_dir_all(repo);
     }
 }
