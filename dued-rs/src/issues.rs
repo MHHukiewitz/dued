@@ -165,8 +165,13 @@ fn add(
     found.push(json!({"kind": kind, "detail": detail, "score": score, "relpath": relpath, "name": name}));
 }
 
+/// List issues ordered by score descending.
+///
+/// `limit` is a **per-kind** cap (top N by score within each kind).
+/// Pass a negative `limit` to return every row (no per-kind cap).
+/// Pass `0` for an empty list.
 pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
-    if limit <= 0 {
+    if limit == 0 {
         return Vec::new();
     }
     let mut stmt = conn
@@ -194,6 +199,9 @@ pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
         .unwrap()
         .flatten()
         .collect();
+    if limit < 0 {
+        return all;
+    }
     select_per_kind(all, limit as usize)
 }
 
@@ -301,6 +309,19 @@ mod tests {
                 .count(),
             1
         );
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn list_issues_negative_limit_returns_all_rows() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        seed_crowded_issues(&conn);
+        let listed = list_issues(&conn, -1);
+        let gods = listed.iter().filter(|r| r["kind"] == "god_function").count();
+        assert_eq!(gods, 50);
+        assert_eq!(listed.len(), 53);
+        assert!(list_issues(&conn, 0).is_empty());
         let _ = fs::remove_dir_all(repo);
     }
 

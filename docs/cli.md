@@ -88,6 +88,22 @@ List unused symbols, isolated files, and hollow stubs.
 
 List god functions, I/O in core, and shotgun-surgery flags.
 
+The limit is applied **per kind** (top N by score within each kind), not as a
+global row cap. That keeps minority kinds visible when one kind is crowded.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--limit N` | 40 | Max issues per kind |
+| `--all` | off | Return every issue row; ignore `--limit` |
+
+Examples:
+
+```text
+dued --json issues
+dued --json issues --limit 100
+dued --json issues --all
+```
+
 ## `dued names`
 
 Report name-health flags and homonyms.
