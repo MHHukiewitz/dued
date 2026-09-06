@@ -98,8 +98,9 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         .unwrap()
         .flatten()
     {
-        // Docs, tests, fixtures, assets, cursor config, and markdown/json QA
-        // co-change with product code by design. Those pairs are not surgery.
+        // Docs, tests, fixtures, assets, cursor config, markdown/json QA,
+        // Cargo lock/manifests, and shell starters co-change with product
+        // code by design. Those pairs are not surgery.
         if is_shotgun_noise_partner(&row.0) || is_shotgun_noise_partner(&row.1) {
             continue;
         }
@@ -133,7 +134,8 @@ fn is_effect_non_core_path(path: &str) -> bool {
     })
 }
 
-/// True when a coupling partner is docs/QA noise rather than production surgery.
+/// True when a coupling partner is docs/QA / lockfile / starter noise
+/// rather than production surgery.
 fn is_shotgun_noise_partner(path: &str) -> bool {
     let path = Path::new(path);
     if path.components().any(|c| {
@@ -154,6 +156,17 @@ fn is_shotgun_noise_partner(path: &str) -> bool {
         )
     }) {
         return true;
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = name.to_ascii_lowercase();
+        // Lockfiles and crate manifests churn with product trees by design.
+        if lower == "cargo.lock" || lower == "cargo.toml" {
+            return true;
+        }
+        // Shell starters (start.sh, start-dev.sh, …) are wiring, not surgery.
+        if lower.starts_with("start") && lower.ends_with(".sh") {
+            return true;
+        }
     }
     match path
         .extension()
@@ -376,6 +389,9 @@ mod tests {
             (4, "tests/fixtures/scenarios/a.toml"),
             (5, "assets/locales/en.json"),
             (6, ".cursor/rules.md"),
+            (7, "Cargo.lock"),
+            (8, "crates/mainnet_graph/Cargo.toml"),
+            (9, "scripts/start-dev.sh"),
         ] {
             conn.execute(
                 "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'rust', 'd', 10, 20, 0)",
@@ -383,13 +399,17 @@ mod tests {
             )
             .unwrap();
         }
-        // docs/QA/assets/cursor noise must not become shotgun_surgery.
+        // docs/QA/assets/cursor/Cargo/starter noise must not become shotgun_surgery.
         for (a, b) in [
             ("docs/design/flow.md", "src/game/graph_bridge.rs"),
             ("src/game/graph_bridge.rs", "tests/fixtures/scenarios/a.toml"),
             ("assets/locales/en.json", "src/game/graph_bridge.rs"),
             (".cursor/rules.md", "src/game/graph_bridge.rs"),
             ("AGENTS.md", "src/game/graph_bridge.rs"),
+            ("Cargo.lock", "src/game/graph_bridge.rs"),
+            ("crates/mainnet_graph/Cargo.toml", "src/game/graph_bridge.rs"),
+            ("scripts/start-dev.sh", "src/game/graph_bridge.rs"),
+            ("start.sh", "crates/mainnet_graph/src/lib.rs"),
         ] {
             conn.execute(
                 "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES (?1, ?2, 5, 1.0)",
@@ -417,9 +437,15 @@ mod tests {
             "{shotguns:?}"
         );
         assert!(
-            !shotguns
-                .iter()
-                .any(|d| d.contains("docs/") || d.contains("fixtures") || d.contains("assets/") || d.contains(".cursor")),
+            !shotguns.iter().any(|d| {
+                d.contains("docs/")
+                    || d.contains("fixtures")
+                    || d.contains("assets/")
+                    || d.contains(".cursor")
+                    || d.contains("Cargo.lock")
+                    || d.contains("Cargo.toml")
+                    || d.contains("start")
+            }),
             "{shotguns:?}"
         );
         let _ = fs::remove_dir_all(repo);
@@ -434,9 +460,18 @@ mod tests {
         assert!(is_shotgun_noise_partner(".cursor/rules.md"));
         assert!(is_shotgun_noise_partner("AGENTS.md"));
         assert!(is_shotgun_noise_partner("config/settings.json"));
+        assert!(is_shotgun_noise_partner("Cargo.lock"));
+        assert!(is_shotgun_noise_partner("Cargo.toml"));
+        assert!(is_shotgun_noise_partner("crates/foo/Cargo.toml"));
+        assert!(is_shotgun_noise_partner("start.sh"));
+        assert!(is_shotgun_noise_partner("scripts/start-dev.sh"));
+        assert!(is_shotgun_noise_partner("bin/start_server.sh"));
         assert!(!is_shotgun_noise_partner("crates/mainnet_graph/src/lib.rs"));
         assert!(!is_shotgun_noise_partner("src/game/graph_bridge.rs"));
         assert!(!is_shotgun_noise_partner("src/game/state.rs"));
+        // Not a starter: must begin with start, not contain it mid-name.
+        assert!(!is_shotgun_noise_partner("scripts/restart.sh"));
+        assert!(!is_shotgun_noise_partner("scripts/bootstrap.sh"));
     }
 
     #[test]
