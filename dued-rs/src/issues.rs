@@ -146,7 +146,7 @@ fn is_effect_boundary_path(path: &str) -> bool {
 fn is_effect_non_core_path(path: &str) -> bool {
     Path::new(path).components().any(|c| {
         let part = c.as_os_str().to_string_lossy().to_lowercase();
-        matches!(part.as_str(), "ui" | "scripts" | "tools")
+        matches!(part.as_str(), "ui" | "scripts" | "tools" | "bin")
     })
 }
 
@@ -739,24 +739,27 @@ mod tests {
     }
 
     #[test]
-    fn is_effect_non_core_path_matches_ui_scripts_tools() {
+    fn is_effect_non_core_path_matches_ui_scripts_tools_bin() {
         assert!(is_effect_non_core_path("src/ui/renderer.rs"));
         assert!(is_effect_non_core_path("src/ui/mod.rs"));
         assert!(is_effect_non_core_path("scripts/bench.py"));
         assert!(is_effect_non_core_path("tools/codegen.rs"));
         assert!(is_effect_non_core_path("UI/View.swift"));
+        assert!(is_effect_non_core_path("src/bin/demand_calib.rs"));
+        assert!(is_effect_non_core_path("bin/helper.rs"));
         assert!(!is_effect_non_core_path("src/game/state.rs"));
         assert!(!is_effect_non_core_path("src/sim/step.rs"));
         assert!(!is_effect_non_core_path("src/domain/model.rs"));
         assert!(!is_effect_non_core_path("core/engine.py"));
         assert!(!is_effect_non_core_path("crates/mainnet_graph/src/lib.rs"));
-        // Substring alone is not enough: path segment must be ui/scripts/tools.
+        // Substring alone is not enough: path segment must be ui/scripts/tools/bin.
         assert!(!is_effect_non_core_path("src/circuit/guide.rs"));
         assert!(!is_effect_non_core_path("src/toolsmith/mod.rs"));
+        assert!(!is_effect_non_core_path("src/binary/format.rs"));
     }
 
     #[test]
-    fn effect_in_core_skips_ui_scripts_tools_keeps_domain() {
+    fn effect_in_core_skips_ui_scripts_tools_bin_keeps_domain() {
         let repo = temp_repo();
         let conn = connect(&repo);
         let effects = r#"["filesystem"]"#;
@@ -769,6 +772,7 @@ mod tests {
             (6, "tools/dump_db.rs"),
             (7, "core/engine.py"),
             (8, "src/cli.py"),
+            (9, "src/bin/demand_calib.rs"),
         ] {
             conn.execute(
                 "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'rust', 'd', 40, 80, 0)",
@@ -811,6 +815,12 @@ mod tests {
         );
         assert!(
             !effect_paths.iter().any(|p| p.starts_with("scripts/") || p.starts_with("tools/")),
+            "{effect_paths:?}"
+        );
+        assert!(
+            !effect_paths
+                .iter()
+                .any(|p| p.contains("/bin/") || *p == "src/bin/demand_calib.rs"),
             "{effect_paths:?}"
         );
         // Existing BOUNDARY substrings still suppress the flag.
