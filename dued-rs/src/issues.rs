@@ -100,18 +100,32 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         .flatten()
     {
         // Docs, tests, fixtures, assets, cursor config, tools/, markdown/json
-        // QA, Cargo lock/manifests, and shell starters co-change with product
-        // code by design. Those pairs are not surgery.
+        // QA, Cargo lock/manifests, gitignore-style meta files, and shell
+        // starters co-change with product code by design. Those pairs are
+        // not surgery.
         if is_shotgun_noise_partner(&row.0) || is_shotgun_noise_partner(&row.1) {
             continue;
         }
         if far_apart(&row.0, &row.1) && row.3 >= 0.4 {
             let detail = format!("{} <-> {} shared={}", row.0, row.1, row.2);
-            let fid: Option<i64> = conn
-                .query_row("SELECT id FROM files WHERE relpath = ?", [&row.0], |r| r.get(0))
-                .ok();
-            let name = file_basename(&row.0);
-            add(conn, &mut found, None, fid, "shotgun_surgery", &detail, row.3, &row.0, &name);
+            // Anchor must be an indexed file so list_issues can JOIN
+            // relpath/name. Prefer file_a; fall back to file_b; skip if
+            // neither partner is in `files` (e.g. deleted or never walked).
+            let Some((fid, anchor)) = shotgun_indexed_anchor(conn, &row.0, &row.1) else {
+                continue;
+            };
+            let name = file_basename(&anchor);
+            add(
+                conn,
+                &mut found,
+                None,
+                Some(fid),
+                "shotgun_surgery",
+                &detail,
+                row.3,
+                &anchor,
+                &name,
+            );
         }
     }
     found
@@ -150,8 +164,8 @@ fn is_effect_non_core_path(path: &str) -> bool {
     })
 }
 
-/// True when a coupling partner is docs/QA / tools / lockfile / starter noise
-/// rather than production surgery.
+/// True when a coupling partner is docs/QA / tools / lockfile / gitignore /
+/// starter noise rather than production surgery.
 fn is_shotgun_noise_partner(path: &str) -> bool {
     let path = Path::new(path);
     if path.components().any(|c| {
@@ -180,6 +194,18 @@ fn is_shotgun_noise_partner(path: &str) -> bool {
         let lower = name.to_ascii_lowercase();
         // Lockfiles and crate manifests churn with product trees by design.
         if lower == "cargo.lock" || lower == "cargo.toml" {
+            return true;
+        }
+        // Repo meta / ignore files co-change with sources; not surgery.
+        if matches!(
+            lower.as_str(),
+            ".gitignore"
+                | ".gitattributes"
+                | ".gitmodules"
+                | ".editorconfig"
+                | ".dockerignore"
+                | ".npmignore"
+        ) {
             return true;
         }
         // Shell starters (start.sh, start-dev.sh, …) are wiring, not surgery.
@@ -225,6 +251,34 @@ pub(crate) fn file_basename(relpath: &str) -> String {
         .to_string()
 }
 
+fn file_id_for(conn: &Connection, relpath: &str) -> Option<i64> {
+    conn.query_row("SELECT id FROM files WHERE relpath = ?", [relpath], |r| r.get(0))
+        .ok()
+}
+
+/// Prefer `file_a` when indexed; else `file_b`. None when neither is in `files`.
+fn shotgun_indexed_anchor(conn: &Connection, file_a: &str, file_b: &str) -> Option<(i64, String)> {
+    if let Some(id) = file_id_for(conn, file_a) {
+        return Some((id, file_a.to_string()));
+    }
+    if let Some(id) = file_id_for(conn, file_b) {
+        return Some((id, file_b.to_string()));
+    }
+    None
+}
+
+/// First path in a shotgun detail string (`a <-> b shared=N`).
+///
+/// Used when `issues.file_id` is NULL (legacy rows / unindexed file_a) so
+/// `list_issues` can still emit a usable relpath + basename after #37.
+pub(crate) fn shotgun_detail_anchor(detail: &str) -> Option<String> {
+    let left = detail.split(" <-> ").next()?.trim();
+    if left.is_empty() {
+        return None;
+    }
+    Some(left.to_string())
+}
+
 /// Fill `name` / `start_line` for issue JSON rows.
 ///
 /// Symbol-backed kinds keep the joined symbol fields. File-level kinds
@@ -246,6 +300,20 @@ pub(crate) fn resolve_issue_anchor(
     let name = file_basename(path);
     let start = first_symbol_line.unwrap_or(1);
     (Some(name), Some(start))
+}
+
+/// Resolve display `relpath` for an issue row.
+///
+/// When the files JOIN misses (NULL `file_id`), recover the left path from a
+/// shotgun detail string so callers never see null name/relpath.
+pub(crate) fn resolve_issue_relpath(kind: &str, detail: &str, joined: Option<String>) -> Option<String> {
+    if joined.is_some() {
+        return joined;
+    }
+    if kind == "shotgun_surgery" {
+        return shotgun_detail_anchor(detail);
+    }
+    None
 }
 
 /// List issues ordered by score descending.
@@ -271,7 +339,10 @@ pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
         .unwrap();
     let all: Vec<Value> = stmt
         .query_map([], |r| {
-            let relpath: Option<String> = r.get(3)?;
+            let kind: String = r.get(0)?;
+            let detail: String = r.get(1)?;
+            let joined_relpath: Option<String> = r.get(3)?;
+            let relpath = resolve_issue_relpath(&kind, &detail, joined_relpath);
             let symbol_name: Option<String> = r.get(4)?;
             let symbol_start: Option<i64> = r.get(5)?;
             let first_symbol_line: Option<i64> = r.get(6)?;
@@ -282,8 +353,8 @@ pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
                 first_symbol_line,
             );
             Ok(json!({
-                "kind": r.get::<_, String>(0)?,
-                "detail": r.get::<_, String>(1)?,
+                "kind": kind,
+                "detail": detail,
                 "score": r.get::<_, f64>(2)?,
                 "relpath": relpath,
                 "name": name,
@@ -561,6 +632,8 @@ mod tests {
                 "tools/data_ingestion/literacy_fill.rs",
             ),
             ("tools/data_studio/export.rs", "src/game/graph_bridge.rs"),
+            (".gitignore", "src/main.rs"),
+            (".editorconfig", "crates/mainnet_graph/src/lib.rs"),
         ] {
             conn.execute(
                 "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES (?1, ?2, 5, 1.0)",
@@ -597,6 +670,8 @@ mod tests {
                     || d.contains("Cargo.toml")
                     || d.contains("start")
                     || d.contains("tools/")
+                    || d.contains(".gitignore")
+                    || d.contains(".editorconfig")
             }),
             "{shotguns:?}"
         );
@@ -745,6 +820,12 @@ mod tests {
         assert!(is_shotgun_noise_partner("tools/data_ingestion/literacy_fill.rs"));
         assert!(is_shotgun_noise_partner("tools/data_studio/export.rs"));
         assert!(is_shotgun_noise_partner("TOOLS/Dump.rs"));
+        assert!(is_shotgun_noise_partner(".gitignore"));
+        assert!(is_shotgun_noise_partner(".gitattributes"));
+        assert!(is_shotgun_noise_partner(".gitmodules"));
+        assert!(is_shotgun_noise_partner(".editorconfig"));
+        assert!(is_shotgun_noise_partner(".dockerignore"));
+        assert!(is_shotgun_noise_partner(".npmignore"));
         assert!(!is_shotgun_noise_partner("crates/mainnet_graph/src/lib.rs"));
         assert!(!is_shotgun_noise_partner("src/game/graph_bridge.rs"));
         assert!(!is_shotgun_noise_partner("src/game/state.rs"));
@@ -754,6 +835,98 @@ mod tests {
         // Not a starter: must begin with start, not contain it mid-name.
         assert!(!is_shotgun_noise_partner("scripts/restart.sh"));
         assert!(!is_shotgun_noise_partner("scripts/bootstrap.sh"));
+    }
+
+    #[test]
+    fn shotgun_skips_unindexed_partners_or_anchors_on_indexed() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        // Only src/main.rs is indexed; .gitignore and gone/old.rs are not.
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'src/main.rs', 'rust', 'd', 40, 80, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'crates/foo/src/lib.rs', 'rust', 'e', 20, 40, 0)",
+            [],
+        )
+        .unwrap();
+        // Noise: must not emit even if somehow indexed later.
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('.gitignore', 'src/main.rs', 4, 1.0)",
+            [],
+        )
+        .unwrap();
+        // Neither partner indexed → skip (no null-anchor row).
+        // Top-level segments differ so far_apart is true.
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('gone/a.rs', 'other/b.rs', 6, 1.0)",
+            [],
+        )
+        .unwrap();
+        // file_a unindexed, file_b indexed → anchor on file_b.
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('gone/orphan.rs', 'crates/foo/src/lib.rs', 5, 0.9)",
+            [],
+        )
+        .unwrap();
+        // Both indexed production pair still emits.
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('crates/foo/src/lib.rs', 'src/main.rs', 8, 0.95)",
+            [],
+        )
+        .unwrap();
+
+        let found = apply_issues(&conn);
+        let shotguns: Vec<&Value> = found.iter().filter(|r| r["kind"] == "shotgun_surgery").collect();
+        assert_eq!(shotguns.len(), 2, "{shotguns:?}");
+        assert!(
+            !shotguns.iter().any(|r| {
+                r["detail"].as_str().unwrap_or("").contains(".gitignore")
+                    || r["detail"].as_str().unwrap_or("").contains("gone/a.rs")
+                    || r["detail"].as_str().unwrap_or("").contains("other/b.rs")
+            }),
+            "{shotguns:?}"
+        );
+        let orphan = shotguns
+            .iter()
+            .find(|r| r["detail"].as_str().unwrap_or("").contains("gone/orphan.rs"))
+            .unwrap();
+        assert_eq!(orphan["relpath"], "crates/foo/src/lib.rs");
+        assert_eq!(orphan["name"], "lib.rs");
+
+        let listed = list_issues(&conn, -1);
+        for row in listed.iter().filter(|r| r["kind"] == "shotgun_surgery") {
+            assert!(row["relpath"].as_str().is_some(), "{row}");
+            assert!(!row["relpath"].as_str().unwrap().is_empty(), "{row}");
+            assert!(row["name"].as_str().is_some(), "{row}");
+            assert!(!row["name"].as_str().unwrap().is_empty(), "{row}");
+            assert!(row["start_line"].as_i64().is_some(), "{row}");
+        }
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn list_issues_recovers_shotgun_relpath_when_file_id_null() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        // Legacy / buggy row: shotgun with NULL file_id (the #49 path).
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (NULL, NULL, 'shotgun_surgery', '.gitignore <-> src/main.rs shared=4', 0.8)",
+            [],
+        )
+        .unwrap();
+        let listed = list_issues(&conn, -1);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["relpath"], ".gitignore");
+        assert_eq!(listed[0]["name"], ".gitignore");
+        assert_eq!(listed[0]["start_line"], 1);
+        assert_eq!(
+            shotgun_detail_anchor(".gitignore <-> src/main.rs shared=4").as_deref(),
+            Some(".gitignore")
+        );
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
