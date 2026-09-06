@@ -223,7 +223,10 @@ fn query_issues(conn: &Connection) -> Vec<Value> {
         )
         .unwrap();
     stmt.query_map([], |r| {
-        let relpath: Option<String> = r.get(3)?;
+        let kind: String = r.get(0)?;
+        let detail: String = r.get(1)?;
+        let joined_relpath: Option<String> = r.get(3)?;
+        let relpath = crate::issues::resolve_issue_relpath(&kind, &detail, joined_relpath);
         let symbol_name: Option<String> = r.get(4)?;
         let symbol_start: Option<i64> = r.get(5)?;
         let first_symbol_line: Option<i64> = r.get(8)?;
@@ -234,8 +237,8 @@ fn query_issues(conn: &Connection) -> Vec<Value> {
             first_symbol_line,
         );
         Ok(json!({
-            "kind": r.get::<_, String>(0)?,
-            "detail": r.get::<_, String>(1)?,
+            "kind": kind,
+            "detail": detail,
             "score": r.get::<_, f64>(2)?,
             "relpath": relpath,
             "name": name,
