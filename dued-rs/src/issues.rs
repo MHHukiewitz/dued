@@ -99,8 +99,8 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         .unwrap()
         .flatten()
     {
-        // Docs, tests, fixtures, assets, cursor config, markdown/json QA,
-        // Cargo lock/manifests, and shell starters co-change with product
+        // Docs, tests, fixtures, assets, cursor config, tools/, markdown/json
+        // QA, Cargo lock/manifests, and shell starters co-change with product
         // code by design. Those pairs are not surgery.
         if is_shotgun_noise_partner(&row.0) || is_shotgun_noise_partner(&row.1) {
             continue;
@@ -150,7 +150,7 @@ fn is_effect_non_core_path(path: &str) -> bool {
     })
 }
 
-/// True when a coupling partner is docs/QA / lockfile / starter noise
+/// True when a coupling partner is docs/QA / tools / lockfile / starter noise
 /// rather than production surgery.
 fn is_shotgun_noise_partner(path: &str) -> bool {
     let path = Path::new(path);
@@ -169,6 +169,9 @@ fn is_shotgun_noise_partner(path: &str) -> bool {
                 | ".cursor"
                 | "locales"
                 | "locale"
+                // Offline data tooling (data_ingestion / data_studio) co-changes
+                // with game crates by design; same segment rule as effect_in_core.
+                | "tools"
         )
     }) {
         return true;
@@ -532,6 +535,9 @@ mod tests {
             (7, "Cargo.lock"),
             (8, "crates/mainnet_graph/Cargo.toml"),
             (9, "scripts/start-dev.sh"),
+            (10, "tools/data_ingestion/literacy_fill.rs"),
+            (11, "tools/data_studio/export.rs"),
+            (12, "src/game/firm_lifecycle.rs"),
         ] {
             conn.execute(
                 "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'rust', 'd', 10, 20, 0)",
@@ -539,7 +545,7 @@ mod tests {
             )
             .unwrap();
         }
-        // docs/QA/assets/cursor/Cargo/starter noise must not become shotgun_surgery.
+        // docs/QA/assets/cursor/Cargo/starter/tools noise must not become shotgun_surgery.
         for (a, b) in [
             ("docs/design/flow.md", "src/game/graph_bridge.rs"),
             ("src/game/graph_bridge.rs", "tests/fixtures/scenarios/a.toml"),
@@ -550,6 +556,11 @@ mod tests {
             ("crates/mainnet_graph/Cargo.toml", "src/game/graph_bridge.rs"),
             ("scripts/start-dev.sh", "src/game/graph_bridge.rs"),
             ("start.sh", "crates/mainnet_graph/src/lib.rs"),
+            (
+                "src/game/firm_lifecycle.rs",
+                "tools/data_ingestion/literacy_fill.rs",
+            ),
+            ("tools/data_studio/export.rs", "src/game/graph_bridge.rs"),
         ] {
             conn.execute(
                 "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES (?1, ?2, 5, 1.0)",
@@ -585,6 +596,7 @@ mod tests {
                     || d.contains("Cargo.lock")
                     || d.contains("Cargo.toml")
                     || d.contains("start")
+                    || d.contains("tools/")
             }),
             "{shotguns:?}"
         );
@@ -730,9 +742,15 @@ mod tests {
         assert!(is_shotgun_noise_partner("start.sh"));
         assert!(is_shotgun_noise_partner("scripts/start-dev.sh"));
         assert!(is_shotgun_noise_partner("bin/start_server.sh"));
+        assert!(is_shotgun_noise_partner("tools/data_ingestion/literacy_fill.rs"));
+        assert!(is_shotgun_noise_partner("tools/data_studio/export.rs"));
+        assert!(is_shotgun_noise_partner("TOOLS/Dump.rs"));
         assert!(!is_shotgun_noise_partner("crates/mainnet_graph/src/lib.rs"));
         assert!(!is_shotgun_noise_partner("src/game/graph_bridge.rs"));
         assert!(!is_shotgun_noise_partner("src/game/state.rs"));
+        assert!(!is_shotgun_noise_partner("src/game/firm_lifecycle.rs"));
+        // Substring alone is not enough: path segment must be tools.
+        assert!(!is_shotgun_noise_partner("src/toolsmith/mod.rs"));
         // Not a starter: must begin with start, not contain it mid-name.
         assert!(!is_shotgun_noise_partner("scripts/restart.sh"));
         assert!(!is_shotgun_noise_partner("scripts/bootstrap.sh"));
