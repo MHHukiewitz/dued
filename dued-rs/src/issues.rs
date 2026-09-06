@@ -89,7 +89,8 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
     {
         if row.3 >= 40.0 || row.2 >= 20 {
             let detail = format!("god module symbols={} cognitive={}", row.2, row.3);
-            add(conn, &mut found, None, Some(row.0), "god_module", &detail, row.3, &row.1, "");
+            let name = file_basename(&row.1);
+            add(conn, &mut found, None, Some(row.0), "god_module", &detail, row.3, &row.1, &name);
         }
     }
     let mut stmt = conn.prepare("SELECT file_a, file_b, shared, strength FROM git_coupling").unwrap();
@@ -109,7 +110,8 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
             let fid: Option<i64> = conn
                 .query_row("SELECT id FROM files WHERE relpath = ?", [&row.0], |r| r.get(0))
                 .ok();
-            add(conn, &mut found, None, fid, "shotgun_surgery", &detail, row.3, &row.0, "");
+            let name = file_basename(&row.0);
+            add(conn, &mut found, None, fid, "shotgun_surgery", &detail, row.3, &row.0, &name);
         }
     }
     found
@@ -197,6 +199,38 @@ fn add(
     found.push(json!({"kind": kind, "detail": detail, "score": score, "relpath": relpath, "name": name}));
 }
 
+/// File basename for file-level issue kinds (not a fabricated symbol name).
+pub(crate) fn file_basename(relpath: &str) -> String {
+    Path::new(relpath)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(relpath)
+        .to_string()
+}
+
+/// Fill `name` / `start_line` for issue JSON rows.
+///
+/// Symbol-backed kinds keep the joined symbol fields. File-level kinds
+/// (`god_module`, `shotgun_surgery`, …) have `symbol_id` NULL, so fall back
+/// to the file basename and the earliest symbol line in that file (or 1).
+pub(crate) fn resolve_issue_anchor(
+    relpath: Option<&str>,
+    symbol_name: Option<String>,
+    symbol_start: Option<i64>,
+    first_symbol_line: Option<i64>,
+) -> (Option<String>, Option<i64>) {
+    if symbol_name.is_some() {
+        let start = symbol_start.or(first_symbol_line).or(Some(1));
+        return (symbol_name, start);
+    }
+    let Some(path) = relpath else {
+        return (None, None);
+    };
+    let name = file_basename(path);
+    let start = first_symbol_line.unwrap_or(1);
+    (Some(name), Some(start))
+}
+
 /// List issues ordered by score descending.
 ///
 /// `limit` is a **per-kind** cap (top N by score within each kind).
@@ -209,7 +243,8 @@ pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT i.kind, i.detail, i.score, f.relpath, s.name, s.start_line
+        SELECT i.kind, i.detail, i.score, f.relpath, s.name, s.start_line,
+               (SELECT MIN(ss.start_line) FROM symbols ss WHERE ss.file_id = i.file_id)
         FROM issues i
         LEFT JOIN files f ON f.id = i.file_id
         LEFT JOIN symbols s ON s.id = i.symbol_id
@@ -219,13 +254,23 @@ pub fn list_issues(conn: &Connection, limit: i64) -> Vec<Value> {
         .unwrap();
     let all: Vec<Value> = stmt
         .query_map([], |r| {
+            let relpath: Option<String> = r.get(3)?;
+            let symbol_name: Option<String> = r.get(4)?;
+            let symbol_start: Option<i64> = r.get(5)?;
+            let first_symbol_line: Option<i64> = r.get(6)?;
+            let (name, start_line) = resolve_issue_anchor(
+                relpath.as_deref(),
+                symbol_name,
+                symbol_start,
+                first_symbol_line,
+            );
             Ok(json!({
                 "kind": r.get::<_, String>(0)?,
                 "detail": r.get::<_, String>(1)?,
                 "score": r.get::<_, f64>(2)?,
-                "relpath": r.get::<_, Option<String>>(3)?,
-                "name": r.get::<_, Option<String>>(4)?,
-                "start_line": r.get::<_, Option<i64>>(5)?,
+                "relpath": relpath,
+                "name": name,
+                "start_line": start_line,
             }))
         })
         .unwrap()
@@ -448,6 +493,130 @@ mod tests {
             }),
             "{shotguns:?}"
         );
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn list_issues_file_level_kinds_get_basename_and_start_line() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'core/engine.py', 'python', 'a', 100, 200, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'ui/view.py', 'python', 'b', 40, 80, 0)",
+            [],
+        )
+        .unwrap();
+        // Earliest symbol in engine.py starts at line 3.
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+             VALUES (10, 1, 'run', 'function', 3, 40, 'def run()', '', 'pass', 1, 20, 1, 0, 1, 0, 0, '[]', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+             VALUES (11, 1, 'helper', 'function', 50, 60, 'def helper()', '', 'pass', 1, 1, 1, 0, 1, 0, 0, '[]', 0, 0)",
+            [],
+        )
+        .unwrap();
+        // File-level rows: no symbol_id (this is the #37 bug path).
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (NULL, 1, 'god_module', 'god module symbols=20', 50.0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (NULL, 2, 'shotgun_surgery', 'core/engine.py <-> ui/view.py', 0.8)",
+            [],
+        )
+        .unwrap();
+        // Symbol-backed row must keep the real symbol name/line.
+        conn.execute(
+            "INSERT INTO issues(symbol_id, file_id, kind, detail, score) VALUES (10, 1, 'god_function', 'god function', 90.0)",
+            [],
+        )
+        .unwrap();
+
+        let listed = list_issues(&conn, -1);
+        let god_mod = listed.iter().find(|r| r["kind"] == "god_module").unwrap();
+        assert_eq!(god_mod["name"], "engine.py");
+        assert_eq!(god_mod["start_line"], 3);
+        assert_eq!(god_mod["relpath"], "core/engine.py");
+
+        let shotgun = listed.iter().find(|r| r["kind"] == "shotgun_surgery").unwrap();
+        assert_eq!(shotgun["name"], "view.py");
+        // No symbols in ui/view.py → start_line falls back to 1.
+        assert_eq!(shotgun["start_line"], 1);
+        assert_eq!(shotgun["relpath"], "ui/view.py");
+
+        let god_fn = listed.iter().find(|r| r["kind"] == "god_function").unwrap();
+        assert_eq!(god_fn["name"], "run");
+        assert_eq!(god_fn["start_line"], 3);
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn resolve_issue_anchor_uses_basename_not_fake_symbol() {
+        let (name, start) = resolve_issue_anchor(Some("crates/foo/src/lib.rs"), None, None, Some(7));
+        assert_eq!(name.as_deref(), Some("lib.rs"));
+        assert_eq!(start, Some(7));
+        let (name, start) = resolve_issue_anchor(Some("core/engine.py"), None, None, None);
+        assert_eq!(name.as_deref(), Some("engine.py"));
+        assert_eq!(start, Some(1));
+        let (name, start) = resolve_issue_anchor(Some("core/engine.py"), Some("run".into()), Some(3), Some(1));
+        assert_eq!(name.as_deref(), Some("run"));
+        assert_eq!(start, Some(3));
+        assert_eq!(file_basename("a/b/c.py"), "c.py");
+    }
+
+    #[test]
+    fn apply_issues_god_module_and_shotgun_carry_basename() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        // Build a crowded module so god_module fires.
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'core/engine.py', 'python', 'a', 200, 400, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'ui/view.py', 'python', 'b', 40, 80, 0)",
+            [],
+        )
+        .unwrap();
+        for i in 0..20 {
+            conn.execute(
+                "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+                 VALUES (?1, 1, ?2, 'function', ?3, ?4, 'def x()', '', 'pass', 1, 3, 1, 0, 1, 0, 0, '[]', 0, 0)",
+                params![i + 1, format!("fn_{i}"), i * 10 + 1, i * 10 + 5],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO git_coupling(file_a, file_b, shared, strength) VALUES ('core/engine.py', 'ui/view.py', 5, 0.9)",
+            [],
+        )
+        .unwrap();
+
+        let found = apply_issues(&conn);
+        let god_mod = found.iter().find(|r| r["kind"] == "god_module").unwrap();
+        assert_eq!(god_mod["name"], "engine.py");
+        let shotgun = found.iter().find(|r| r["kind"] == "shotgun_surgery").unwrap();
+        assert_eq!(shotgun["name"], "engine.py");
+
+        // list_issues must also populate start_line for these kinds.
+        let listed = list_issues(&conn, -1);
+        let gm = listed.iter().find(|r| r["kind"] == "god_module").unwrap();
+        assert_eq!(gm["name"], "engine.py");
+        assert_eq!(gm["start_line"], 1);
+        let ss = listed.iter().find(|r| r["kind"] == "shotgun_surgery").unwrap();
+        assert_eq!(ss["name"], "engine.py");
+        assert_eq!(ss["start_line"], 1);
         let _ = fs::remove_dir_all(repo);
     }
 

@@ -213,7 +213,8 @@ fn query_issues(conn: &Connection) -> Vec<Value> {
     let mut stmt = conn
         .prepare(
             r#"
-        SELECT i.kind, i.detail, i.score, f.relpath, s.name, s.start_line, f.language, f.is_test
+        SELECT i.kind, i.detail, i.score, f.relpath, s.name, s.start_line, f.language, f.is_test,
+               (SELECT MIN(ss.start_line) FROM symbols ss WHERE ss.file_id = i.file_id)
         FROM issues i
         LEFT JOIN files f ON f.id = i.file_id
         LEFT JOIN symbols s ON s.id = i.symbol_id
@@ -222,13 +223,23 @@ fn query_issues(conn: &Connection) -> Vec<Value> {
         )
         .unwrap();
     stmt.query_map([], |r| {
+        let relpath: Option<String> = r.get(3)?;
+        let symbol_name: Option<String> = r.get(4)?;
+        let symbol_start: Option<i64> = r.get(5)?;
+        let first_symbol_line: Option<i64> = r.get(8)?;
+        let (name, start_line) = crate::issues::resolve_issue_anchor(
+            relpath.as_deref(),
+            symbol_name,
+            symbol_start,
+            first_symbol_line,
+        );
         Ok(json!({
             "kind": r.get::<_, String>(0)?,
             "detail": r.get::<_, String>(1)?,
             "score": r.get::<_, f64>(2)?,
-            "relpath": r.get::<_, Option<String>>(3)?,
-            "name": r.get::<_, Option<String>>(4)?,
-            "start_line": r.get::<_, Option<i64>>(5)?,
+            "relpath": relpath,
+            "name": name,
+            "start_line": start_line,
             "language": r.get::<_, Option<String>>(6)?,
             "is_test": r.get::<_, Option<i64>>(7)?,
         }))

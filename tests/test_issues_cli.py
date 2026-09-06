@@ -82,6 +82,17 @@ def test_json_issues_includes_effect_and_shotgun(tmp_path: Path) -> None:
     assert sum(1 for row in rows if row["kind"] == "god_function") == 40
     assert sum(1 for row in rows if row["kind"] == "shotgun_surgery") == 1
 
+    for kind in ("god_module", "shotgun_surgery"):
+        file_rows = [row for row in rows if row["kind"] == kind]
+        assert file_rows, kind
+        for row in file_rows:
+            assert row.get("name"), row
+            assert row.get("start_line") is not None, row
+            assert isinstance(row["start_line"], int), row
+            assert row["start_line"] >= 1, row
+            # File-level kinds use basename, not a fabricated symbol.
+            assert "/" not in str(row["name"]), row
+
     human = runner.invoke(app, ["--repo", str(repo), "--quiet", "issues"])
     assert human.exit_code == 0, human.output
     assert "effect_in_core" in human.stdout
