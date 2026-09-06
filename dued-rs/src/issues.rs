@@ -40,7 +40,7 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
     for row in &rows {
         bar.tick(&row.1);
         let loc = (row.7 - row.6 + 1).max(1);
-        let score = row.2 as f64 * (1.0 + row.3 as f64 / 5.0) * (1.0 + loc as f64 / 80.0);
+        let score = god_function_score(row.2, row.3, loc);
         if row.2 >= 15 || score >= 40.0 {
             let detail = format!("god function cognitive={} fan_out={} loc={}", row.2, row.3, loc);
             add(conn, &mut found, Some(row.0), Some(row.8), "god_function", &detail, score, &row.9, &row.1);
@@ -115,6 +115,20 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         }
     }
     found
+}
+
+/// Score a god-function candidate.
+///
+/// Complexity (cognitive × fan_out) dominates. LOC still contributes, but with
+/// logarithmic dampening so large low-complexity symbols (constructors, data
+/// tables) do not outrank smaller high-cognitive functions.
+///
+/// At `loc == 80` the LOC factor is `2.0`, matching the former linear
+/// `1 + loc/80` reference point. Beyond that, growth is sub-linear.
+fn god_function_score(cognitive: i64, fan_out: i64, loc: i64) -> f64 {
+    let loc = (loc.max(1)) as f64;
+    let loc_factor = 1.0 + loc.ln() / 80f64.ln();
+    cognitive as f64 * (1.0 + fan_out as f64 / 5.0) * loc_factor
 }
 
 fn far_apart(a: &str, b: &str) -> bool {
@@ -320,6 +334,87 @@ mod tests {
     use crate::store::connect;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn god_score_size_only_giant_below_high_cog() {
+        // Issue #36: renderer::new style (cog=8, loc=1437) must not outrank
+        // a smaller high-cognitive function.
+        let size_only = god_function_score(8, 0, 1437);
+        let high_cog = god_function_score(25, 5, 80);
+        assert!(
+            size_only < high_cog,
+            "size-only={size_only} must rank below high-cog={high_cog}"
+        );
+        // With low fan_out, size alone must not clear the score threshold.
+        assert!(
+            size_only < 40.0,
+            "size-only score {size_only} should stay under the 40 gate"
+        );
+    }
+
+    #[test]
+    fn god_score_loc80_matches_former_linear_reference() {
+        // At loc=80 the dampened factor equals the old 1 + loc/80 = 2.
+        let score = god_function_score(20, 0, 80);
+        assert!((score - 40.0).abs() < 1e-9, "got {score}");
+    }
+
+    #[test]
+    fn apply_issues_ranks_high_cog_above_size_only_giant() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (1, 'src/render.rs', 'rust', 'a', 1500, 3000, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (2, 'src/engine.rs', 'rust', 'b', 100, 200, 0)",
+            [],
+        )
+        .unwrap();
+        // Large low-complexity constructor (issue #36 shape).
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+             VALUES (1, 1, 'new', 'function', 1, 1437, 'fn new()', '', '', 1, 8, 1, 0, 1, 0, 0, '[]', 0, 0)",
+            [],
+        )
+        .unwrap();
+        // Smaller high-cognitive god.
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+             VALUES (2, 2, 'step', 'function', 1, 80, 'fn step()', '', '', 20, 25, 4, 3, 1, 0, 0, '[]', 2, 5)",
+            [],
+        )
+        .unwrap();
+
+        let found = apply_issues(&conn);
+        let gods: Vec<&Value> = found
+            .iter()
+            .filter(|r| r["kind"] == "god_function")
+            .collect();
+        let names: Vec<&str> = gods.iter().filter_map(|r| r["name"].as_str()).collect();
+        assert!(
+            names.contains(&"step"),
+            "high-cog step must be flagged: {names:?}"
+        );
+        assert!(
+            !names.contains(&"new"),
+            "size-only new must not be flagged: {names:?}"
+        );
+        let step_score = gods
+            .iter()
+            .find(|r| r["name"] == "step")
+            .unwrap()["score"]
+            .as_f64()
+            .unwrap();
+        let size_score = god_function_score(8, 0, 1437);
+        assert!(
+            step_score > size_score,
+            "step={step_score} must beat size-only={size_score}"
+        );
+        let _ = fs::remove_dir_all(repo);
+    }
 
     fn temp_repo() -> std::path::PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
