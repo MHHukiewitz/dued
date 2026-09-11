@@ -10,8 +10,11 @@ fn effect_patterns() -> &'static [(&'static str, Regex)] {
             // Bare English "open" is not filesystem; require open( / File:: / OpenOptions / fs paths.
             ("filesystem", r"\b(open\(|read_file|write_file|Path\(|fs\.|fs::|std::fs|tokio::fs|File::|OpenOptions)\b"),
             ("network", r"\b(requests\.|httpx|fetch\(|axios|ureq|reqwest|hyper::|websocket)\b"),
-            ("db", r"(?i)\b(execute\(|query\(|sqlite3|sqlalchemy|prisma|diesel|sqlx)\b"),
-            ("process", r"\b(subprocess|os\.system|child_process|Command::|std::process)\b"),
+            // Bare `.query(` is not db (e.g. SpatialIndex); require DB APIs / sqlx `query!`.
+            // No trailing \b after execute(/query!( — next char is often "(" or a quote.
+            ("db", r"(?i)\b(sqlite3|sqlalchemy|prisma|diesel|sqlx)\b|\bexecute\(|query!\("),
+            // Bare `Command::` enum arms and `std::process::id()` are not process spawn.
+            ("process", r"\b(subprocess|os\.system|child_process|std::process::Command|Command::new)\b"),
             // Python `global` statement only; comment text like "global customer" must not match.
             ("global_mutate", r"(?m)^\s*global\b|static mut\b"),
             ("unsafe", r"\bunsafe\b|\beval\("),
@@ -78,6 +81,51 @@ mod tests {
         let body = "def f():\n    global x\n    x = 1\n";
         let tags = tag_effects(body);
         assert!(tags.iter().any(|t| t == "global_mutate"), "{tags:?}");
+    }
+
+    #[test]
+    fn spatial_index_query_is_not_db() {
+        let body = "fn find_region_at(&self, x: f64, y: f64) -> Option<RegionId> { self.index.query(x, y) }";
+        let tags = tag_effects(body);
+        assert!(!tags.iter().any(|t| t == "db"), "{tags:?}");
+    }
+
+    #[test]
+    fn real_db_apis_are_db() {
+        let sqlite = "fn load() { let _ = sqlite3.connect(\"x\"); }";
+        let exec = "fn run(conn) { conn.execute(\"SELECT 1\"); }";
+        let sqlx_macro = "async fn load(pool: &PgPool) { let _ = query!(\"SELECT 1\"); }";
+        let sqlx_path = "async fn load(pool: &PgPool) { let _ = sqlx::query(\"SELECT 1\"); }";
+        assert!(tag_effects(sqlite).iter().any(|t| t == "db"), "{:?}", tag_effects(sqlite));
+        assert!(tag_effects(exec).iter().any(|t| t == "db"), "{:?}", tag_effects(exec));
+        assert!(tag_effects(sqlx_macro).iter().any(|t| t == "db"), "{:?}", tag_effects(sqlx_macro));
+        assert!(tag_effects(sqlx_path).iter().any(|t| t == "db"), "{:?}", tag_effects(sqlx_path));
+    }
+
+    #[test]
+    fn command_enum_and_process_id_are_not_process() {
+        let parse = "fn parse_command(s: &str) -> Command { Command::Parse }";
+        let run = "fn run_command(c: Command) { match c { Command::Run => {} } }";
+        let report = "fn format_exit_report() -> String { format!(\"pid {}\", std::process::id()) }";
+        let path = "fn campaign_io_path() -> PathBuf { PathBuf::from(format!(\"{}\", std::process::id())) }";
+        for body in [parse, run, report, path] {
+            let tags = tag_effects(body);
+            assert!(!tags.iter().any(|t| t == "process"), "{body} -> {tags:?}");
+        }
+    }
+
+    #[test]
+    fn process_spawn_apis_are_process() {
+        let cmd_new = "fn run() { let _ = Command::new(\"true\"); }";
+        let std_cmd = "fn run() { let _ = std::process::Command::new(\"true\"); }";
+        let sub = "def run():\n    subprocess.run([\"true\"])\n";
+        let system = "def run():\n    os.system(\"true\")\n";
+        let child = "const { spawn } = require(\"child_process\");";
+        assert!(tag_effects(cmd_new).iter().any(|t| t == "process"), "{:?}", tag_effects(cmd_new));
+        assert!(tag_effects(std_cmd).iter().any(|t| t == "process"), "{:?}", tag_effects(std_cmd));
+        assert!(tag_effects(sub).iter().any(|t| t == "process"), "{:?}", tag_effects(sub));
+        assert!(tag_effects(system).iter().any(|t| t == "process"), "{:?}", tag_effects(system));
+        assert!(tag_effects(child).iter().any(|t| t == "process"), "{:?}", tag_effects(child));
     }
 }
 
