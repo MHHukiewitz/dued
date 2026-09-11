@@ -11,7 +11,8 @@ fn effect_patterns() -> &'static [(&'static str, Regex)] {
             ("filesystem", r"\b(open\(|read_file|write_file|Path\(|fs\.|fs::|std::fs|tokio::fs|File::|OpenOptions)\b"),
             ("network", r"\b(requests\.|httpx|fetch\(|axios|ureq|reqwest|hyper::|websocket)\b"),
             // Bare `.query(` is not db (e.g. SpatialIndex); require DB APIs / sqlx `query!`.
-            ("db", r"(?i)\b(execute\(|sqlite3|sqlalchemy|prisma|diesel|sqlx)\b|query!\("),
+            // No trailing \b after execute(/query!( — next char is often "(" or a quote.
+            ("db", r"(?i)\b(sqlite3|sqlalchemy|prisma|diesel|sqlx)\b|\bexecute\(|query!\("),
             // Bare `Command::` enum arms and `std::process::id()` are not process spawn.
             ("process", r"\b(subprocess|os\.system|child_process|std::process::Command|Command::new)\b"),
             // Python `global` statement only; comment text like "global customer" must not match.
