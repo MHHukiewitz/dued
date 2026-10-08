@@ -41,7 +41,9 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         bar.tick(&row.1);
         let loc = (row.7 - row.6 + 1).max(1);
         let score = god_function_score(row.2, row.3, loc);
-        if row.2 >= 15 || score >= 40.0 {
+        // Docs (e.g. docs/design/prove/** QA scripts) are not product code;
+        // their size and fan-out are not a god-function signal.
+        if (row.2 >= 15 || score >= 40.0) && !has_docs_segment(&row.9) {
             let detail = format!("god function cognitive={} fan_out={} loc={}", row.2, row.3, loc);
             add(conn, &mut found, Some(row.0), Some(row.8), "god_function", &detail, score, &row.9, &row.1);
         }
@@ -87,7 +89,8 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
         .unwrap()
         .flatten()
     {
-        if row.3 >= 40.0 || row.2 >= 20 {
+        // Same docs/doc segment rule as god_function: docs are not core modules.
+        if (row.3 >= 40.0 || row.2 >= 20) && !has_docs_segment(&row.1) {
             let detail = format!("god module symbols={} cognitive={}", row.2, row.3);
             let name = file_basename(&row.1);
             add(conn, &mut found, None, Some(row.0), "god_module", &detail, row.3, &row.1, &name);
@@ -156,15 +159,24 @@ fn is_effect_boundary_path(path: &str) -> bool {
     BOUNDARY.iter().any(|m| path.contains(m))
 }
 
-/// True when the path is presentation, tooling, or docs — not game/sim/domain core.
-fn is_effect_non_core_path(path: &str) -> bool {
+/// True when any path segment (case-insensitive) is one of `segments`.
+/// Substrings do not match: `src/docs_view.rs` has no `docs` segment.
+fn has_path_segment(path: &str, segments: &[&str]) -> bool {
     Path::new(path).components().any(|c| {
         let part = c.as_os_str().to_string_lossy().to_lowercase();
-        matches!(
-            part.as_str(),
-            "ui" | "scripts" | "tools" | "bin" | "docs" | "doc"
-        )
+        segments.contains(&part.as_str())
     })
+}
+
+/// True when the path has a `docs` or `doc` segment. Docs are non-core for
+/// `effect_in_core`, `god_function`, and `god_module`.
+fn has_docs_segment(path: &str) -> bool {
+    has_path_segment(path, &["docs", "doc"])
+}
+
+/// True when the path is presentation, tooling, or docs — not game/sim/domain core.
+fn is_effect_non_core_path(path: &str) -> bool {
+    has_path_segment(path, &["ui", "scripts", "tools", "bin"]) || has_docs_segment(path)
 }
 
 /// True when a coupling partner is docs/QA / tools / lockfile / gitignore /
@@ -1032,6 +1044,93 @@ mod tests {
         assert!(
             !effect_paths.iter().any(|p| p.ends_with("cli.py")),
             "{effect_paths:?}"
+        );
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn has_docs_segment_matches_segment_only() {
+        assert!(has_docs_segment("docs/design/prove/2026-10-07-458-network-access-string-ui/_soft_gl_shot.py"));
+        assert!(has_docs_segment("doc/guide.py"));
+        assert!(has_docs_segment("crates/foo/docs/example.rs"));
+        assert!(has_docs_segment("DOCS/Readme.py"));
+        assert!(!has_docs_segment("src/docs_view.rs"));
+        assert!(!has_docs_segment("src/documentation/mod.rs"));
+        assert!(!has_docs_segment("src/game/state.rs"));
+        // god kinds skip only docs/doc, not the wider effect_in_core list.
+        assert!(!has_docs_segment("src/ui/renderer.rs"));
+        assert!(!has_docs_segment("scripts/bench.py"));
+        assert!(!has_docs_segment("tools/codegen.rs"));
+        assert!(!has_docs_segment("src/bin/demand_calib.rs"));
+    }
+
+    fn insert_crowded_file(conn: &Connection, file_id: i64, path: &str) {
+        conn.execute(
+            "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'python', 'd', 400, 800, 0)",
+            params![file_id, path],
+        )
+        .unwrap();
+        // One big function (god_function) plus enough symbols for god_module.
+        conn.execute(
+            "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+             VALUES (?1, ?2, 'main', 'function', 1, 120, 'def main()', '', 'pass', 10, 30, 3, 0, 1, 0, 0, '[]', 0, 40)",
+            params![file_id * 100, file_id],
+        )
+        .unwrap();
+        for i in 1..21 {
+            conn.execute(
+                "INSERT INTO symbols(id, file_id, name, kind, start_line, end_line, signature, docstring, body, cyclomatic, cognitive, nesting, nargs, is_public, is_entry, is_test, effects, fan_in, fan_out)
+                 VALUES (?1, ?2, ?3, 'function', ?4, ?5, 'def x()', '', 'pass', 1, 1, 1, 0, 1, 0, 0, '[]', 0, 0)",
+                params![file_id * 100 + i, file_id, format!("helper_{i}"), 120 + i * 5, 120 + i * 5 + 3],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn god_findings_skip_docs_segments_keep_src() {
+        let repo = temp_repo();
+        let conn = connect(&repo);
+        let paths = [
+            (1, "docs/design/prove/2026-10-07-458-network-access-string-ui/_soft_gl_shot.py"),
+            (2, "doc/guide.py"),
+            (3, "src/game/state.py"),
+            (4, "src/docs_view.py"),
+            (5, "src/ui/panel.py"),
+        ];
+        for (id, path) in paths {
+            insert_crowded_file(&conn, id, path);
+        }
+
+        let found = apply_issues(&conn);
+        let paths_for = |kind: &str| -> Vec<String> {
+            found
+                .iter()
+                .filter(|r| r["kind"] == kind)
+                .filter_map(|r| r["relpath"].as_str().map(String::from))
+                .collect()
+        };
+        let god_fn = paths_for("god_function");
+        let god_mod = paths_for("god_module");
+
+        // docs/ and doc/ god_function and god_module are skipped.
+        assert!(!god_fn.iter().any(|p| has_docs_segment(p)), "{god_fn:?}");
+        assert!(!god_mod.iter().any(|p| has_docs_segment(p)), "{god_mod:?}");
+        // src/ paths are still reported, including a non-segment `docs_` name.
+        for kept in ["src/game/state.py", "src/docs_view.py", "src/ui/panel.py"] {
+            assert!(god_fn.iter().any(|p| p == kept), "god_function {kept}: {god_fn:?}");
+            assert!(god_mod.iter().any(|p| p == kept), "god_module {kept}: {god_mod:?}");
+        }
+        assert_eq!(god_mod.len(), 3, "{god_mod:?}");
+
+        // list_issues reflects the same skip.
+        let listed = list_issues(&conn, -1);
+        assert!(
+            !listed.iter().any(|r| {
+                matches!(r["kind"].as_str(), Some("god_function" | "god_module"))
+                    && r["relpath"].as_str().is_some_and(has_docs_segment)
+            }),
+            "{listed:?}"
         );
         let _ = fs::remove_dir_all(repo);
     }
