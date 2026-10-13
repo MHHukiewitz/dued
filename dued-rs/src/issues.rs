@@ -52,7 +52,7 @@ pub fn apply_issues(conn: &Connection) -> Vec<Value> {
             .filter(|t| matches!(*t, "filesystem" | "network" | "db" | "process"))
             .collect();
         // Core = game/sim/domain (and other non-boundary product code).
-        // UI, scripts, and tools do I/O by design; they are not core.
+        // UI, scripts, tools, bin, and docs do I/O by design; they are not core.
         if !io.is_empty()
             && row.4 >= 2
             && !is_effect_boundary_path(&row.9)
@@ -156,11 +156,14 @@ fn is_effect_boundary_path(path: &str) -> bool {
     BOUNDARY.iter().any(|m| path.contains(m))
 }
 
-/// True when the path is presentation or tooling, not game/sim/domain core.
+/// True when the path is presentation, tooling, or docs — not game/sim/domain core.
 fn is_effect_non_core_path(path: &str) -> bool {
     Path::new(path).components().any(|c| {
         let part = c.as_os_str().to_string_lossy().to_lowercase();
-        matches!(part.as_str(), "ui" | "scripts" | "tools" | "bin")
+        matches!(
+            part.as_str(),
+            "ui" | "scripts" | "tools" | "bin" | "docs" | "doc"
+        )
     })
 }
 
@@ -930,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn is_effect_non_core_path_matches_ui_scripts_tools_bin() {
+    fn is_effect_non_core_path_matches_ui_scripts_tools_bin_docs() {
         assert!(is_effect_non_core_path("src/ui/renderer.rs"));
         assert!(is_effect_non_core_path("src/ui/mod.rs"));
         assert!(is_effect_non_core_path("scripts/bench.py"));
@@ -938,19 +941,25 @@ mod tests {
         assert!(is_effect_non_core_path("UI/View.swift"));
         assert!(is_effect_non_core_path("src/bin/demand_calib.rs"));
         assert!(is_effect_non_core_path("bin/helper.rs"));
+        assert!(is_effect_non_core_path(
+            "docs/design/prove/2026-09-27-350-access-lines-place-heat/_soft_gl_shot.py"
+        ));
+        assert!(is_effect_non_core_path("docs/design/flow.md"));
+        assert!(is_effect_non_core_path("doc/guide.py"));
         assert!(!is_effect_non_core_path("src/game/state.rs"));
         assert!(!is_effect_non_core_path("src/sim/step.rs"));
         assert!(!is_effect_non_core_path("src/domain/model.rs"));
         assert!(!is_effect_non_core_path("core/engine.py"));
         assert!(!is_effect_non_core_path("crates/mainnet_graph/src/lib.rs"));
-        // Substring alone is not enough: path segment must be ui/scripts/tools/bin.
+        // Substring alone is not enough: path segment must be ui/scripts/tools/bin/docs/doc.
         assert!(!is_effect_non_core_path("src/circuit/guide.rs"));
         assert!(!is_effect_non_core_path("src/toolsmith/mod.rs"));
         assert!(!is_effect_non_core_path("src/binary/format.rs"));
+        assert!(!is_effect_non_core_path("src/documentation/mod.rs"));
     }
 
     #[test]
-    fn effect_in_core_skips_ui_scripts_tools_bin_keeps_domain() {
+    fn effect_in_core_skips_ui_scripts_tools_bin_docs_keeps_domain() {
         let repo = temp_repo();
         let conn = connect(&repo);
         let effects = r#"["filesystem"]"#;
@@ -964,6 +973,7 @@ mod tests {
             (7, "core/engine.py"),
             (8, "src/cli.py"),
             (9, "src/bin/demand_calib.rs"),
+            (10, "docs/design/prove/_soft_gl_shot.py"),
         ] {
             conn.execute(
                 "INSERT INTO files(id, relpath, language, digest, loc, size, is_test) VALUES (?1, ?2, 'rust', 'd', 40, 80, 0)",
@@ -1012,6 +1022,10 @@ mod tests {
             !effect_paths
                 .iter()
                 .any(|p| p.contains("/bin/") || *p == "src/bin/demand_calib.rs"),
+            "{effect_paths:?}"
+        );
+        assert!(
+            !effect_paths.iter().any(|p| p.starts_with("docs/")),
             "{effect_paths:?}"
         );
         // Existing BOUNDARY substrings still suppress the flag.
