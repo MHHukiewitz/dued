@@ -8,7 +8,9 @@ fn effect_patterns() -> &'static [(&'static str, Regex)] {
     PATS.get_or_init(|| {
         [
             // Bare English "open" is not filesystem; require open( / File:: / OpenOptions / fs paths.
-            ("filesystem", r"\b(open\(|read_file|write_file|Path\(|fs\.|fs::|std::fs|tokio::fs|File::|OpenOptions)\b"),
+            // `fs.` alone also matches a local variable named `fs` (e.g. fs.remaining_days); require a
+            // known Node fs API name after `fs.` so plain field/method access on an `fs` binding is skipped.
+            ("filesystem", r"\b(open\(|read_file|write_file|Path\(|fs\.(promises|createReadStream|createWriteStream|watch|watchFile|(readFile|writeFile|appendFile|exists|mkdir|rmdir|rm|unlink|readdir|stat|lstat|copyFile|rename|open|close|chmod|chown|truncate|access|realpath|symlink|readlink|link)(Sync)?)|fs::|std::fs|tokio::fs|File::|OpenOptions)\b"),
             ("network", r"\b(requests\.|httpx|fetch\(|axios|ureq|reqwest|hyper::|websocket)\b"),
             // Bare `.query(` is not db (e.g. SpatialIndex); require DB APIs / sqlx `query!`.
             // No trailing \b after execute(/query!( — next char is often "(" or a quote.
@@ -67,6 +69,31 @@ mod tests {
         let opts = "fn load() { let _ = std::fs::OpenOptions::new().read(true).open(\"x\"); }";
         assert!(tag_effects(file_open).iter().any(|t| t == "filesystem"), "{:?}", tag_effects(file_open));
         assert!(tag_effects(opts).iter().any(|t| t == "filesystem"), "{:?}", tag_effects(opts));
+    }
+
+    #[test]
+    fn fs_local_variable_is_not_filesystem() {
+        let rust = "fn tick(fs: &mut Fleet) { fs.remaining_days = fs.remaining_days.saturating_sub(1); }";
+        let py = "def tick(fs):\n    fs.remaining_days = fs.free_sub(1)\n";
+        let js = "function tick(fs) { fs.remaining_days = fs.len(); }";
+        for body in [rust, py, js] {
+            let tags = tag_effects(body);
+            assert!(!tags.iter().any(|t| t == "filesystem"), "{body} -> {tags:?}");
+        }
+    }
+
+    #[test]
+    fn fs_paths_and_node_apis_are_filesystem() {
+        let std_fs = "fn load() { let _ = std::fs::read(\"x\"); }";
+        let fs_write = "fn save() { let _ = fs::write(\"x\", b\"y\"); }";
+        let use_fs = "use std::fs;\nfn load() { let _ = fs::read_to_string(\"x\"); }";
+        let tokio_fs = "async fn load() { let _ = tokio::fs::read(\"x\").await; }";
+        let node_fs = "function load() { fs.readFileSync(\"x\"); }";
+        let node_async = "async function save() { await fs.promises.writeFile(\"x\", \"y\"); fs.writeFile(\"z\", \"y\", cb); }";
+        for body in [std_fs, fs_write, use_fs, tokio_fs, node_fs, node_async] {
+            let tags = tag_effects(body);
+            assert!(tags.iter().any(|t| t == "filesystem"), "{body} -> {tags:?}");
+        }
     }
 
     #[test]
