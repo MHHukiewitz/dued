@@ -7,10 +7,12 @@ fn effect_patterns() -> &'static [(&'static str, Regex)] {
     static PATS: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
     PATS.get_or_init(|| {
         [
-            // Bare English "open" is not filesystem; require open( / File:: / OpenOptions / fs paths.
+            // Bare English "open" is not filesystem; require File:: / OpenOptions / fs paths. Calls to
+            // `open(` are checked separately in `open_call_is_filesystem` so a local binding named
+            // `open` (closure, variable or parameter) is not read as a file open.
             // `fs.` alone also matches a local variable named `fs` (e.g. fs.remaining_days); require a
             // known Node fs API name after `fs.` so plain field/method access on an `fs` binding is skipped.
-            ("filesystem", r"\b(open\(|read_file|write_file|Path\(|fs\.(promises|createReadStream|createWriteStream|watch|watchFile|(readFile|writeFile|appendFile|exists|mkdir|rmdir|rm|unlink|readdir|stat|lstat|copyFile|rename|open|close|chmod|chown|truncate|access|realpath|symlink|readlink|link)(Sync)?)|fs::|std::fs|tokio::fs|File::|OpenOptions)\b"),
+            ("filesystem", r"\b(read_file|write_file|Path\(|fs\.(promises|createReadStream|createWriteStream|watch|watchFile|(readFile|writeFile|appendFile|exists|mkdir|rmdir|rm|unlink|readdir|stat|lstat|copyFile|rename|open|close|chmod|chown|truncate|access|realpath|symlink|readlink|link)(Sync)?)|fs::|std::fs|tokio::fs|File::|OpenOptions)\b"),
             ("network", r"\b(requests\.|httpx|fetch\(|axios|ureq|reqwest|hyper::|websocket)\b"),
             // Bare `.query(` is not db (e.g. SpatialIndex); require DB APIs / sqlx `query!`.
             // No trailing \b after execute(/query!( — next char is often "(" or a quote.
@@ -28,10 +30,47 @@ fn effect_patterns() -> &'static [(&'static str, Regex)] {
     })
 }
 
+/// A call written `open(`. Group 1 is the character before `open` so `.open(` and `::open(`
+/// (method and path calls) can be told apart from a bare call. The trailing `\b` keeps the
+/// behavior of the old `\b(open\(|...)\b` alternation.
+fn open_call_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(^|[^\w])open\(\b").unwrap())
+}
+
+/// The body binds a local name `open`: a Rust/JS variable, a Python assignment, a closure
+/// parameter, a fn/def/function parameter, or a JS arrow parameter.
+fn open_local_binding_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(concat!(
+            r"\b(?:let|const|var)\s+(?:mut\s+)?open\b",
+            r"|(?m:^\s*open\s*(?::[^=\n]*)?=[^=])",
+            r"|\|(?:[^|\n]*,)?\s*(?:mut\s+)?open\s*(?:[:,][^|\n]*)?\|",
+            r"|\b(?:fn|def|function)\s*\w*\s*(?:<[^>\n]*>)?\s*\((?:[^)]*,)?\s*(?:mut\s+)?open\s*[:,)=]",
+            r"|\(\s*(?:[^()\n]*,\s*)?open\s*(?:,[^()\n]*)?\)\s*=>",
+        ))
+        .unwrap()
+    })
+}
+
+/// `open(` is a file open unless it is a bare call to a local binding named `open`.
+/// `.open(` and `::open(` stay file opens (e.g. `OpenOptions::new().open`, `fs::open`).
+fn open_call_is_filesystem(body: &str) -> bool {
+    let mut bare = false;
+    for c in open_call_re().captures_iter(body) {
+        match c.get(1).map(|m| m.as_str()) {
+            Some(".") | Some(":") => return true,
+            _ => bare = true,
+        }
+    }
+    bare && !open_local_binding_re().is_match(body)
+}
+
 pub fn tag_effects(body: &str) -> Vec<String> {
     let mut tags = Vec::new();
     for (name, pat) in effect_patterns() {
-        if pat.is_match(body) {
+        if pat.is_match(body) || (*name == "filesystem" && open_call_is_filesystem(body)) {
             tags.push((*name).to_string());
         }
     }
@@ -91,6 +130,37 @@ mod tests {
         let node_fs = "function load() { fs.readFileSync(\"x\"); }";
         let node_async = "async function save() { await fs.promises.writeFile(\"x\", \"y\"); fs.writeFile(\"z\", \"y\", cb); }";
         for body in [std_fs, fs_write, use_fs, tokio_fs, node_fs, node_async] {
+            let tags = tag_effects(body);
+            assert!(tags.iter().any(|t| t == "filesystem"), "{body} -> {tags:?}");
+        }
+    }
+
+    #[test]
+    fn open_local_binding_is_not_filesystem() {
+        let closure = "fn unreachable_cells(&self) -> Vec<Cell> { let open = |x: i32, y: i32| -> bool { self.is_inside(x, y) }; if open(n.0, n.1) { out.push(n); } out }";
+        let closure_mut = "fn f() { let mut open = |c| c > 0; open(c) }";
+        let param = "fn walk(open: impl Fn(i32) -> bool) -> bool { open(x) }";
+        let closure_param = "fn walk(xs: &[i32]) { xs.iter().for_each(|open| { open(x); }) }";
+        let py_param = "def walk(cells, open):\n    return [c for c in cells if open(c)]\n";
+        let py_assign = "def walk(cells):\n    open = cells.get\n    return open(cells)\n";
+        let js = "function walk(cells) { const open = (c) => c > 0; return open(cells); }";
+        let js_arrow = "const walk = (cells, open) => open(cells);";
+        for body in [closure, closure_mut, param, closure_param, py_param, py_assign, js, js_arrow] {
+            let tags = tag_effects(body);
+            assert!(!tags.iter().any(|t| t == "filesystem"), "{body} -> {tags:?}");
+        }
+    }
+
+    #[test]
+    fn real_open_calls_are_filesystem() {
+        let py_with = "def load(path):\n    with open(path) as f:\n        return f.read()\n";
+        let py_bare = "def load(path):\n    f = open(path)\n    return f\n";
+        let file_open = "fn load(p: &Path) { let _ = File::open(p); }";
+        let opts = "fn load(p: &Path) { let _ = OpenOptions::new().read(true).open(p); }";
+        let fs_open = "fn load(p: &Path) { let _ = fs::open(p); }";
+        let os_open = "def load(path):\n    return os.open(path, 0)\n";
+        let either_or = "function f(x) { return x || open(p) || y; }";
+        for body in [py_with, py_bare, file_open, opts, fs_open, os_open, either_or] {
             let tags = tag_effects(body);
             assert!(tags.iter().any(|t| t == "filesystem"), "{body} -> {tags:?}");
         }
