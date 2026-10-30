@@ -137,6 +137,19 @@ fn python_import_names(node: Node, source: &[u8]) -> Vec<String> {
     names
 }
 
+/// True when an enclosing `mod` item carries `#[cfg(test)]`, so helpers in a
+/// test module (no `#[test]` of their own) are test code, not core.
+fn in_cfg_test_module(node: Node, source: &[u8]) -> bool {
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if p.kind() == "mod_item" && leading_attrs(p, source).contains("cfg(test)") {
+            return true;
+        }
+        cur = p.parent();
+    }
+    false
+}
+
 fn leading_attrs(node: Node, source: &[u8]) -> String {
     let mut parts = Vec::new();
     let mut prev = node.prev_named_sibling();
@@ -452,7 +465,11 @@ fn walk_rust(node: Node, source: &[u8], out: &mut Extracted) {
             .take(240)
             .collect();
         let body = text(source, node);
-        let is_test = attrs.contains("test]") || body.contains("#[test]") || name.starts_with("test_");
+        let is_test = attrs.contains("test]")
+            || attrs.contains("cfg(test)")
+            || body.contains("#[test]")
+            || name.starts_with("test_")
+            || in_cfg_test_module(node, source);
         push_fn(
             out,
             source,
@@ -636,6 +653,55 @@ pub type WholesaleId = u64;
             .collect();
         assert_eq!(by_name.get("AccessTier"), Some(&"enum"));
         assert_eq!(by_name.get("WholesaleId"), Some(&"type"));
+    }
+
+    #[test]
+    fn rust_cfg_test_module_helpers_are_test() {
+        let src = br#"
+pub fn load_plan(path: &str) -> String { std::fs::read_to_string(path).unwrap() }
+
+mod plain {
+    pub fn plain_helper() -> u32 { 1 }
+}
+
+#[cfg(test)]
+fn cfg_test_fn() -> u32 { 2 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    mod nested {
+        pub fn deep_helper() -> u32 { 3 }
+    }
+
+    #[test]
+    fn reads() {
+        let _ = load_plan(temp_dir("x").to_str().unwrap());
+    }
+}
+"#;
+        let extracted = parse_source("rust", ".rs", src);
+        let is_test = |n: &str| {
+            extracted
+                .symbols
+                .iter()
+                .find(|s| s.name == n)
+                .unwrap_or_else(|| panic!("missing {n}"))
+                .is_test
+        };
+        assert!(is_test("temp_dir"));
+        assert!(is_test("deep_helper"));
+        assert!(is_test("cfg_test_fn"));
+        assert!(is_test("reads"));
+        assert!(!is_test("load_plan"));
+        assert!(!is_test("plain_helper"));
     }
 
     #[test]
